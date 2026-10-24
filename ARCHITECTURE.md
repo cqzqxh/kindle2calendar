@@ -6,13 +6,13 @@
 
 家庭成员通过已有日历产品维护安排，项目只负责读取、排版、发布和设备展示。无需购买云主机，无需维护常驻 Web 服务和业务数据库。Runner / Sandbox 与 Kodo 资源费用按项目规模视为基本可忽略，不将其描述为永久免费。
 
-首版选择一个飞书共享日历、一台 Kindle PW3；钉钉通过后续适配器接入。无需为演示额外加入 AI 或重做手机管理端。业务背景和价值见 [PRODUCT.md](PRODUCT.md)，显示规范见 [DESIGN.md](DESIGN.md)。
+首版选择一个钉钉共享日历、一台 Kindle PW3；飞书通过后续适配器接入。无需为演示额外加入 AI 或重做手机管理端。业务背景和价值见 [PRODUCT.md](PRODUCT.md)，显示规范见 [DESIGN.md](DESIGN.md)。
 
 ## 架构与职责
 
 ```mermaid
 flowchart LR
-    CAL["飞书 / 钉钉日历<br/>手机添加与更新日程"]
+    CAL["钉钉日历<br/>手机添加与更新日程"]
     GH["GitHub Actions<br/>每 30 分钟定时触发"]
     RUN["七牛 Runner<br/>读取日历 · 生成 PNG"]
     KODO[("Kodo 对象存储<br/>保存最新日历图片")]
@@ -28,11 +28,11 @@ flowchart LR
     class RUN,KODO qiniu;
 ```
 
-日历产品负责编辑，GitHub 负责调度，七牛 Runner 按需生成图片，Kodo 持久保存，Kindle 独立拉取展示。首版先接飞书；生成与下载失败时保留上一张成功图片。
+日历产品负责编辑，GitHub 负责调度，七牛 Runner 按需生成图片，Kodo 持久保存，Kindle 独立拉取展示。首版先接钉钉；生成与下载失败时保留上一张成功图片。
 
 | 组件 | 职责 | 持久化内容 |
 | --- | --- | --- |
-| 飞书日历 | 手机编辑、共享权限、日程保存 | 原始日程，作为唯一数据源 |
+| 钉钉日历 | 手机编辑、共享权限、日程保存 | 原始日程，作为唯一数据源 |
 | GitHub | 保存代码和工作流，定时调度，管理任务密钥 | 代码、任务状态和脱敏日志 |
 | 七牛 Runner | 为 Job 创建沙箱，执行 Python 批处理，结束后清理 | 不依赖沙箱本地文件跨任务保存 |
 | Kodo | 保存已发布图片，供设备独立下载 | 当前图片和有限历史版本 |
@@ -42,12 +42,12 @@ flowchart LR
 
 2026-10-24 文档核实时，线上公开模板接口提供 `[qiniu, ubuntu-24.04]` 标签；具体仓库能否使用仍以平台准入和 readiness 为准。无需在个人电脑保持 Runner 在线。
 
-飞书共享日历需先验证家庭成员能在手机中编辑、应用身份能读取实际标题和详情。成员不在同一租户时不能默认具备共享权限；首版使用可完成授权的专用演示日历，再验证家庭实际共享方式。日历接口的具体权限名、令牌接口和重复实例接口在实施时按官方文档确认。
+钉钉共享日历需先验证家庭成员能在手机中编辑，以及调用身份能读取实际标题和详情。首版优先验证企业内部应用接入，按所选日历接口确认使用应用令牌还是用户授权令牌，以及是否要求操作者 unionId；不能假定应用密钥足以读取所有个人日历。成员不在同一组织时不能默认具备共享权限，先用专用演示日历完成验证，再确认家庭实际共享方式。具体权限、令牌及重复实例接口在实施时按钉钉官方文档核实。
 
 ## 一次任务的处理流程
 
 1. 按工作流配置的 `TIMEZONE`（默认 `Asia/Shanghai`）确定当前日期、月历完整网格范围及未来近期安排范围。日历与天气使用同一时区，避免“今天”不一致。
-2. 从 Secrets 获取飞书应用凭据，取得访问令牌，读取已授权的共享日历。首版优先应用身份，只读授权；必须先验证实际能读到活动标题。
+2. 从 Secrets 获取钉钉应用凭据，按已验证的身份与授权流程取得访问令牌，读取指定共享日历；接口要求时传入操作者身份。仅申请读取所需权限，并验证实际能读到活动标题和详情。若接口要求用户授权，应先验证授权与续期方式，再接入定时任务。
 3. 完整拉取所需活动，处理分页、取消和删除状态。首版每次读取完整展示窗口，不维护增量同步游标。
 4. 统一转换为渲染数据：来源 ID、标题、开始、结束、全天标记和成员文字。按时区和真实日期排序，正确处理排他结束日期、跨天事件和重复实例的单次修改 / 取消。全天活动按覆盖日期展示；跨天定时活动拆分为覆盖日期的显示项，进行中的活动仍纳入近期安排。现有 renderer 仅支持 `day/time/title/member`，需由适配层或渲染改造承接这些语义，不丢弃结束时间后直接套用。普通日程列表可能只返回重复规则，需验证实例接口或明确实现规则展开。
 5. 解析 GitHub Actions 的天气地区配置：完整有效的经纬度优先；未填、只填一项或坐标非法时，均回退到城市名称查询坐标，再获取今天起三天的天气。图片展示配置或查询得到的地区名称。网络错误时显示“天气暂不可用”，不阻断日历发布；首版不依赖跨任务的本地天气缓存。
@@ -55,7 +55,7 @@ flowchart LR
 7. 上传不可变版本，确认成功后，再覆盖设备读取的 `latest.png`。任何读取不完整、渲染或发布错误都不主动删除上一版。
 8. 日志仅记录活动数量、生成时间、对象 key、耗时和错误类别，不记录日程正文、令牌或签名 URL。
 
-飞书返回空列表且查询完整成功时，允许发布空日历，以正确体现“全部删除”；接口失败、分页未完成或解析错误不能当作空列表。
+钉钉返回空列表且查询完整成功时，允许发布空日历，以正确体现“全部删除”；接口失败、分页未完成或解析错误不能当作空列表。
 
 ## 调度与刷新
 
@@ -152,8 +152,9 @@ family-calendar/<screen-id>/history/2026-10-24/<run-id>-<attempt>.png
 
 | 配置 | 存放位置 | 用途 |
 | --- | --- | --- |
-| `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | GitHub Secrets | 获取令牌并读取已授权日历 |
-| `FEISHU_CALENDAR_ID` | 仓库 Variables | 指定家庭共享日历 |
+| `DINGTALK_APP_KEY` / `DINGTALK_APP_SECRET` | GitHub Secrets | 钉钉应用凭据，按所选接口完成令牌获取；实际权限需联调验证 |
+| `DINGTALK_CALENDAR_ID` | 仓库 Variables | 指定家庭共享日历 |
+| `DINGTALK_OPERATOR_UNION_ID` | GitHub Secrets，按接口需要配置 | 指定日历读取操作者，不与日历 ID 或组织内 userId 混用 |
 | `QINIU_ACCESS_KEY` / `QINIU_SECRET_KEY` | GitHub Secrets | 专用发布身份，限定 Bucket / 前缀的上传、读回校验和必要恢复权限 |
 | `KODO_BUCKET` / `KODO_DOMAIN` / `SCREEN_ID` | 仓库 Variables | 发布目标与稳定设备标识，域名使用完整 HTTPS 地址 |
 | 天气地区名称、经纬度、TIMEZONE | 仓库 Actions Variables，经工作流 env 传入 | 控制天气查询位置、地区标题和日期时区 |
@@ -164,7 +165,7 @@ family-calendar/<screen-id>/history/2026-10-24/<run-id>-<attempt>.png
 
 Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确。发布者私有下载签名及最小权限组合必须先验证，不能假定“仅有上传权限”足以完成读回和恢复。Python 天气 / Kodo SDK、中文字体及 TLS 版本在 Runner 环境中单独确认。
 
-签名 URL 是访问凭据，通过可信通道配置到设备，文件权限设为仅设备用户可读；通过 curl 配置文件传入，不输出到日志或作为工作流公开产物。泄露后需撤销对应授权或更换对象入口及签发密钥，不能假设签名 URL 有独立的一键撤销接口。设备不保存飞书凭据或 Kodo AK / SK。
+签名 URL 是访问凭据，通过可信通道配置到设备，文件权限设为仅设备用户可读；通过 curl 配置文件传入，不输出到日志或作为工作流公开产物。泄露后需撤销对应授权或更换对象入口及签发密钥，不能假设签名 URL 有独立的一键撤销接口。设备不保存钉钉凭据或 Kodo AK / SK。
 
 设备下载按 Kodo 官方签名 URL 协议实现，通过 curl 配置文件传入完整地址；日志不得回显签名查询参数或完整请求地址。
 
@@ -177,7 +178,7 @@ Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确�
 | 模块 | 状态与工作内容 |
 | --- | --- |
 | `preview.py` | 已有：直接读取输入 JSON 并生成本地 PNG，不启动服务或访问网络 |
-| `calendar_sources/feishu.py` | 待新增：飞书只读接入、分页、日期与重复实例规范化 |
+| `calendar_sources/dingtalk.py` | 待新增：钉钉只读接入、身份与授权、分页、日期与重复实例规范化 |
 | `scripts/publish_calendar.py` | 待新增：读取、渲染、校验、发布的云端批处理入口 |
 | `storage/kodo.py` | 待新增：签名上传、历史版本、覆盖发布及读回校验 |
 | `.github/workflows/calendar.yml` | 待新增：定时 / 手动触发、Runner 标签、Secrets 和串行发布 |
@@ -187,7 +188,7 @@ Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确�
 | `kindle/config.example.sh` | 已提供签名 URL、CA bundle、FBInk 和下载周期配置示例 |
 | 运行依赖 | 当前仅保留 Pillow；实施来源与发布模块时增加必要依赖并固定版本 |
 
-线上入口是执行后退出的 Python 批处理，日程以外部日历为唯一数据源，图片持久化到 Kodo。发布层只依赖统一后的日历数据，后续钉钉适配沿用同一接口。本地直接通过 Python 运行脚本，不要求部署常驻服务。
+线上入口是执行后退出的 Python 批处理，日程以外部日历为唯一数据源，图片持久化到 Kodo。发布层只依赖统一后的日历数据，后续飞书适配沿用同一接口。本地直接通过 Python 运行脚本，不要求部署常驻服务。
 
 ## 验收与实施顺序
 
@@ -206,7 +207,8 @@ Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确�
 - [线上公开 Runner 模板](https://runner.qiniuinc.com/api/public/runner-templates)：已核实包含 `qiniu + ubuntu-24.04`。
 - [GitHub schedule](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)：默认分支、调度间隔、延迟及公开仓库停用规则。
 - [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)：串行运行、待运行任务替换与执行顺序。
-- [飞书日程列表](https://open.feishu.cn/document/server-docs/calendar-v4/calendar-event/list)：身份、访问权限、分页及查询限制；具体重复实例接口在接入时进一步验证。
+- [钉钉开放平台](https://open.dingtalk.com/orgapp)：日历与日程能力入口；具体读取接口、权限、分页和重复实例规则在接入时核实。
+- [钉钉企业内部应用令牌](https://open.dingtalk.com/document/orgapp/obtain-the-access_token-of-an-internal-app)：应用令牌接入入口，是否适用于目标日历须结合具体接口验证。
 - [Kodo 下载凭证](https://developer.qiniu.com/kodo/1202/download-token)：私有资源签名 URL 和到期校验。
 - [Kodo 上传策略](https://developer.qiniu.com/kodo/manual/put-policy)：固定 key 的覆盖和新增语义。
 - [Open-Meteo 城市查询](https://open-meteo.com/en/docs/geocoding-api)：按城市名查询坐标、国家 / 行政区域限定和 GeoNames 来源。
