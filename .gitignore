@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+kindle/config.sh
+artifacts/
+.DS_Store
