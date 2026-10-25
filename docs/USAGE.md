@@ -4,7 +4,7 @@
 
 ## 本机预览
 
-使用 Python 3.12+，当前本机与工作流选定版本为 3.12.15。macOS 使用系统中文字体；Linux 安装 `fonts-noto-cjk`，或通过 `FONT_PATH` 指定字体。以下命令在仓库根目录执行：
+使用 Python 3.12+，当前本地 .venv 实测为 3.14.5，发布工作流选定 3.12.15，Runner 环境尚未实测。macOS 使用系统中文字体；Linux 安装 `fonts-noto-cjk`，或通过 `FONT_PATH` 指定字体。以下命令在仓库根目录执行：
 
 ```sh
 python3 -m venv .venv
@@ -47,104 +47,178 @@ python preview.py --caldav
 
 `--caldav` 与 `--events`、`--offline` 互斥。可同时使用 `--city` 或天气环境变量；未配置地区时天气不可用。读取请求超时为 15 秒，当前本地入口失败后由操作者重新执行。图片输出遵循上述预览文件规则，真实日程图片仅保留在被 Git 忽略的本地路径，勿作为公开附件。
 
-2026-10-25 已实测 CalDAV 连接、发现、读取和本地渲染；Kodo 发布、Kindle 下载与工作流入口已有本地回归，真实云端调度和设备自动更新仍待联调。重复、取消、全天、跨天及读取失败通过模拟数据测试，尚未逐项进行服务端实测。发现及查询接口依据 [python-caldav 官方文档](https://caldav.readthedocs.io/stable/tutorial.html)。
+2026-10-25 已实测 CalDAV 连接、发现、读取和本地渲染；Kodo 发布、Kindle 下载与工作流入口已有本地回归，本机自动生成、Kodo 发布与 Kindle 5 分钟拉取已实测；真实 Runner 调度、HTTPS 图片、RTC 和长期运行仍待验收。重复、取消、全天、跨天及读取失败通过模拟数据测试，尚未逐项进行服务端实测。发现及查询接口依据 [python-caldav 官方文档](https://caldav.readthedocs.io/stable/tutorial.html)。
 
 ## 发布到 Kodo
 
-2026-10-25 使用真实私有 Bucket，在独立 `demo-kodo-smoke` 历史路径上传 4169 字节测试 PNG，再经默认源站 HTTPS 下载，文件字节及 SHA-256 完全一致，未覆盖 `latest.png`。实测默认源站的 60 秒、300 秒签名返回 200，600 秒与 30 天签名返回 403；当前代码读回默认签名 600 秒，不能直接用于该入口。Bucket 的临时测试域名 HTTPS 证书校验失败。完整发布与设备长期链接仍需配置可用的长期 HTTPS 域名并验收，不能将本次短期下载视为完整链路通过。
+图片路径为 `family-calendar/<screen-id>/YYYYMMDD/YYYYMMDDHHmmss.png`，例如 `family-calendar/kindle-pw3/20261026/20261026212259.png`。日期与文件名由 PNG 生成时间转换到 TIMEZONE 得到；只新增、不覆盖。同秒不同内容报告冲突，相同内容重跑幂等成功。上传后读回校验，不先 GET 尚不存在的 key，避免 CDN 负缓存。建议在控制台设置 7 天生命周期，代码不自动清理云端对象。
 
-准备专用私有 Bucket、对应区域的 HTTPS 上传入口和长期 HTTPS 下载域名。发布身份须支持上传、覆盖和私有读回；历史对象建议在 Kodo 控制台设置 7 天生命周期。若使用 CDN，先验证固定 URL 覆盖后能在约定缓存窗口内取到新内容。
+图片必须包含发布元数据，限制为 2 MiB、1072 × 1448、8-bit 灰度、16 级灰阶 PNG。源读取或渲染失败不进入发布，失败不删除已有对象。
 
 | 环境变量 | 配置 |
 | --- | --- |
-| `QINIU_ACCESS_KEY` / `QINIU_SECRET_KEY` | 通过安全环境或 Actions Secrets 注入，禁止写入仓库 |
-| `KODO_BUCKET` | 私有 Bucket 名称 |
-| `KODO_DOMAIN` | 下载 HTTPS 域名，不带路径、查询串或凭据 |
-| `KODO_UPLOAD_HOST` | 该 Bucket 所属区域的 HTTPS 上传入口，按七牛控制台核实 |
-| `KODO_INSECURE_TLS` | 默认 `0`；仅临时联调设为 `1`，跳过 Kodo 下载的证书校验；上传和 CalDAV 仍校验证书 |
-| `SCREEN_ID` | 固定屏幕标识，例如 `demo-screen`，必须与 PNG 元数据一致 |
-| `TIMEZONE` | 图片时区，默认 `Asia/Shanghai` |
+| QINIU_ACCESS_KEY / QINIU_SECRET_KEY | 发布身份，通过本机安全环境或 Actions Secrets 注入，禁止提交 |
+| KODO_BUCKET | 专用私有 Bucket |
+| KODO_DOMAIN | 发布读回使用的 HTTPS 域名，不含路径、查询串或凭据 |
+| KODO_UPLOAD_HOST | Bucket 所属区域的 HTTPS 上传入口 |
+| KODO_INSECURE_TLS | 默认 0；仅临时联调设为 1，跳过 Kodo 下载证书校验；上传和 CalDAV 仍校验证书 |
+| SCREEN_ID | 固定屏幕标识，必须与 PNG 元数据一致 |
+| TIMEZONE | 日历、天气和对象日期的共同 IANA 时区，默认 Asia/Shanghai |
 
-手动工作流可通过 `kodo_domain`、`kodo_upload_host` 指定本次测试地址。先保持 `insecure_kodo_tls=false` 验证正常 HTTPS；若确认失败原因为 `tls_error`，可勾选该开关临时复测。开关默认关闭，定时任务也保持证书校验。开启后无法验证下载服务器的身份，不用于长期运行；测试域名还受有效期、访问权限和缓存限制，跳过证书校验不代表发布链路可用。
-
-环境配置完成后，先生成并检查图片，再执行发布。以下空日历命令只用于专用演示屏幕；发布真实日程时给 preview 提供 `--events` 输入：
+先生成再发布；以下例子读取真实 CalDAV：
 
 ```sh
-python preview.py --screen-id "$SCREEN_ID" --output artifacts/calendar.png
+python preview.py --caldav --screen-id "$SCREEN_ID" --output artifacts/calendar.png
 python -m scripts.publish_calendar --image artifacts/calendar.png
 ```
 
-发布先保存 `family-calendar/<screen-id>/history/<UTC日期>/<run-id>-<attempt>.png`，确认读回后更新 `latest.png` 并再次验证。图片限制为 2 MiB、1072 × 1448、8-bit 灰度 PNG，像素仅使用 16 级灰阶；旧版、冲突版本和元数据不完整的图片会被拒绝。不能直接把任意外部 PNG 当作发布文件。
+发布命令输出脱敏 JSON，包含 status、object_key、sha256、generated_at、exit_code 和 error_code。退出码 0 为发布或幂等成功，2 输入 / 配置错误，3 同秒冲突，5 上传失败或读回未确认。上传和读回通过 HTTP 子进程执行并共享截止时间。
 
-命令输出脱敏 JSON。退出码 `0` 表示发布或相同内容幂等成功，`2` 表示输入/配置错误，`3` 表示旧版本或身份冲突，`4` 表示失败且已保留/恢复旧图，`5` 表示首次失败或最终结果未确认。首次发布无旧版时不会报告回滚成功。程序设有共享总预算和 HTTP 子进程硬超时。
+### 本机每 5 分钟同步
 
-仓库中的 [发布工作流](../.github/workflows/calendar.yml) 使用 GitHub 托管的 `ubuntu-24.04`。Secrets 使用 `QINIU_AK`、`QINIU_SK`、`TECENT_CalDAV_UID` 和 `TECENT_CalDAV_PASSWD`；Variables 使用 `QINIU_BUCKET`、`TECENT_CalDAV_ADDR`、`KODO_DOMAIN` 和 `KODO_UPLOAD_HOST`。手动测试可通过输入项指定本次下载域名和上传入口。工作流读取真实 CalDAV 日程后生成并串行发布，默认 `SCREEN_ID=pw3`，不上传私密 PNG 附件；手动验收完成后再合入默认分支启用 `7,37 * * * *` 定时任务，定时任务使用仓库 Variables 中的域名和上传入口。
+本机已加载 LaunchAgent `com.kindle2calendar.local-sync`，每 300 秒调用 `scripts.sync_calendar`：重新读取 CalDAV、生成图片、发布并读回。脚本用文件锁避免重叠，单轮最多 240 秒；来源或生成失败不上传旧文件。图片显示的预计下次生成时间通过 `--interval-minutes` 传给预览，当前为 5 分钟。
 
-GitHub Free 组织的私有仓库共享每月 2,000 分钟标准 Runner 额度，实际剩余额度以组织账单页面为准。按每天 48 次调度、30 天计算为每月 1,440 次任务，还需考虑每次执行时间及其他工作流的用量；不能保证始终处于免费额度内。见 [GitHub 官方额度说明](https://docs.github.com/en/billing/reference/product-usage-included)。
-
-## 签发设备下载链接
-
-在可信机器注入发布凭据和下载配置后执行（此命令不需要 `KODO_UPLOAD_HOST`）：
+配置位于 `~/Library/LaunchAgents/com.kindle2calendar.local-sync.plist`，凭据来自本机安全环境，兼容 QINIU_AK / QINIU_SK / QINIU_BUCKET。状态位于 `artifacts/local-sync/status.json`，生成图片为 `artifacts/local-sync/calendar.png`，均被 Git 忽略。电脑必须保持唤醒并联网；此任务负责生成与发布，设备还需独立运行拉取脚本。
 
 ```sh
-python -m scripts.sign_download_url --output artifacts/device-url.txt --expires-days 30
+launchctl print gui/$(id -u)/com.kindle2calendar.local-sync
+cat artifacts/local-sync/status.json
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.kindle2calendar.local-sync.plist
+# 重新启动：使用 bootstrap 代替 bootout
 ```
 
-签名链接写入权限 `0600` 的新文件，拒绝覆盖已有文件，终端只显示文件路径和到期时间。通过可信通道把完整链接写入设备配置，禁止贴进日志或提交 Git。默认 30 天、手动续期；实际有效期和固定链接读取新版本的行为仍需真实域名验证。
+### GitHub Actions 发布
+
+[发布工作流](../.github/workflows/calendar.yml) 使用 GitHub 托管的 `ubuntu-24.04`。Secrets 使用 `QINIU_AK`、`QINIU_SK`、`TECENT_CalDAV_UID` 和 `TECENT_CalDAV_PASSWD`；Variables 使用 `QINIU_BUCKET`、`TECENT_CalDAV_ADDR`、`KODO_DOMAIN` 和 `KODO_UPLOAD_HOST`。工作流读取真实 CalDAV 日程，生成不可变图片并串行发布，默认 `SCREEN_ID=pw3`，不上传私人图片到 GitHub Artifacts。
+
+手动运行可通过 `kodo_domain`、`kodo_upload_host` 指定本次测试地址；先保持 `insecure_kodo_tls=false` 验证正常 HTTPS，确认 `tls_error` 后可显式开启该开关临时复测。开关默认关闭，只影响 Kodo 下载，无法解决访问权限、域名有效期或缓存问题。完成手动发布验收并配置仓库 Variables 后，再合入默认分支启用 `7,37 * * * *`；定时任务保持证书校验。
+
+GitHub Free 组织的私有仓库共享每月 2,000 分钟标准 Runner 额度，实际剩余额度以组织账单页面为准。按每天 48 次调度、30 天计算为每月 1,440 次任务，还需考虑每次执行时间及其他工作流的用量。见 [GitHub 官方额度说明](https://docs.github.com/en/billing/reference/product-usage-included)。
+
+## 设备凭据与列表查询
+
+Kindle 使用现有 POSIX sh、curl、OpenSSL、jq、FBInk、lipc 和标准 Unix 工具，无 Python 依赖。在设备安装任何新软件或依赖前，必须先向用户说明并获确认。
+
+2026-10-25 实机确认系统 curl 7.76.1、OpenSSL 1.0.2q、jq-master-a9f97e9、BusyBox 1.28.3，未找到 Python。已完成假数据分页和签名检查，也已使用真实配置完成 HTTPS list、HTTP 图片下载与自动换图。
+
+将 [discovery.example.json](../kindle/discovery.example.json) 填写为设备的 `/var/local/family-calendar/discovery.json`：
+
+```json
+{
+  "access_key": "DEDICATED_DEVICE_ACCESS_KEY",
+  "secret_key": "DEDICATED_DEVICE_SECRET_KEY",
+  "bucket": "YOUR_BUCKET",
+  "screen_id": "kindle-pw3",
+  "domain": "https://YOUR_DOWNLOAD_HOST"
+}
+```
+
+目录权限 0700，文件必须为 0600；脚本拒绝读取其他权限的凭据文件。实机 `/mnt/us` 无法落实 Unix 权限，不存放真实 AK/SK。用户允许 demo 保存设备密钥，真实值仍禁止提交、打印或作为附件。仓库的 `kindle/config.sh`、`kindle/discovery.json` 已被 Git 忽略；示例仅保留占位符。
+
+优先为设备建立专用最小权限身份，限定目标空间 list 和图片读取。实际 list 与下载已通过，但最小权限边界没有完成独立验收；依据 [Kodo IAM 接口表](https://developer.qiniu.com/af/12495/kodo-iam-actions) 配置，不把 S3 action 名直接当作原生 Kodo 权限。
+
+`discover.sh` 每轮完整读取当天全部 list 分页，按有效时间戳选最新图片；当天为空才逐日回溯，最多查询当天及前 6 天。列表失败或分页中断保留旧图，不把失败当空目录。每页最多 1000 项、每天最多 100 页，列表请求共享 90 秒预算，每次 curl 硬超时不超过 15 秒。
+
+选中后用设备 AK/SK 签发 300 秒私有链接，交给 curl；不维护 30 天长期链接。签名材料与 curl 配置写入 `/tmp` 随机私有目录，退出删除，不进入命令参数或日志。设备时钟与 TIMEZONE 必须正确。
+
+默认只允许 HTTPS。当前用户已允许临时 HTTP 图片验证：在 config.sh 显式设置 `ALLOW_HTTP_DOWNLOAD=1`，discovery.json 可填 http:// 下载域名；list 与管理凭证仍强制 HTTPS 并校验 CA。HTTP 图片及下载签名可被网络中间节点读取，此开关只用于已同意的 demo。发布者的 KODO_DOMAIN 仍须 HTTPS，可与设备图片域名不同。
+
+在可信电脑调试单张图可执行：
+
+```sh
+python -m scripts.sign_download_url --key family-calendar/kindle-pw3/20261026/20261026212259.png --output artifacts/device-url.txt --expires-seconds 300
+```
+
+签名写入权限 0600 的新文件，拒绝覆盖，不打印完整链接。此工具不用于配置设备轮询；设备自行逐轮签名。
 
 ## Kindle 下载配置
 
-### 设备实时时钟实验
+### 当前测试实例
 
-当前默认使用静态日历屏保，暂不启用实时时钟，以减少耗电。2026-10-25 已停止设备时钟与轮播，恢复原生状态栏、解除屏保抑制；最新安装的是十月「桂香」月历常规字重版 `preview_202610252057.png`，包含本次读取的 9 条日程展示项与上海三天天气，为唯一屏保图片。安装时备份上一版，核对本地图片、设备副本与屏保入口 SHA-256 一致，确认设备进入 `screenSaver` 状态，并读取设备截图核对布局完整；实际屏幕清晰度仍需用户确认。休眠时实测前光硬件亮度降为 0；用户确认保留休眠省电、靠室内灯光查看。休眠期间的定时唤醒下载尚未接入，不会自动获取下一张日历。以下命令仅保留作实验记录。
-
-`kindle/clock-demo.sh` 在固定预览图右上角叠加北京时间，每到整分钟通过 FBInk 局部刷新。默认使用设备 `/mnt/us/family-calendar/preview_202610241720.png`、`/mnt/us/usbnet/bin/fbink` 和设备自带 Amazon Ember 字体，可用 `IMAGE`、`FBINK`、`FONT` 覆盖。运行前停止其他绘屏程序；在脚本所在目录执行 `nohup sh clock-demo.sh >clock-demo.log 2>&1 </dev/null &`，执行 `sh clock-demo.sh stop` 停止并恢复底图及原屏保抑制状态。不会自动恢复先前的轮播进程，也未设置开机自启。
-
-此实验独立于 `run.sh`，不修改原 PNG 或设备系统时区，不负责网络校时、跨天日历更新与云端图片切换。时钟持续运行需要设备保持唤醒，目前按 USB 供电验证。帧缓冲截图能验证绘制内容；实屏残影、闪烁与长期稳定性仍需观察。
-
-实验保持 `Xorg` 运行，通过 `/usr/sbin/eips` 加载整张底图，FBInk 只负责时钟文字与局部刷新。运行时临时暂停 `JunoStatusBarDriver`，避免原生状态栏覆盖日历，正常停止后恢复；停止可能需要等当前一分钟等待结束。实验期间原生状态栏更新暂停，异常强杀后可通过 SSH 执行 `kill -CONT $(pidof JunoStatusBarDriver)` 恢复。可用 `EIPS` 覆盖原生图片显示命令路径。
-
-2026-10-25 在 PW3 验证 `preview_202610241720.png` 上的时钟从 08:49 自动切换至 08:50；帧缓冲截图像素对比确认变化仅在右上角时钟框内。实屏残影与长时间运行尚未验收。
-
-同日换图后用户发现底部棋盘格，截图无法反映该实屏异常，全屏与黑白清屏未解决。恢复 Xorg、改用原生 `eips` 加载底图后重新叠加时钟，用户确认整张日历及底部天气完整清晰。具体底层原因未单独确定；不再使用暂停 Xorg 的实验方式，长时间运行仍需验收。
-
-将 `kindle/config.example.sh` 复制为设备目录下的 `config.sh`，填写 Kodo `latest.png` 的完整私有 HTTPS 签名 URL、对应域名的可信 CA bundle 路径以及 FBInk 路径。配置文件仅设备用户可读，并记录签名链接到期日。
-
-设备需具备 POSIX sh、支持 HTTPS/TLS 及下载大小限制的 curl、FBInk、lipc 和标准 Unix 工具。复制 `kindle/run.sh`、`kindle/common.sh`、`kindle/control.sh`、私有 `config.sh`、CA bundle 和 FBInk 到 `/mnt/us/family-calendar`。设备时钟必须正确，`URL_EXPIRES_AT` 与链接 `e` 参数一致（也可省略，由脚本读取 `e`）。安装目录仅设备用户可访问，配置权限设为 `0600`。
-
-在设备目录执行：
+测试目录为 `/mnt/us/family-calendar/list-demo/`，包含 run.sh、common.sh、power.sh、discover.sh、statusbar.sh、control.sh 和不含密钥的 config.sh。RTC 测试配置如下：
 
 ```sh
-sh run.sh --once       # 单次同步；先停止已有后台实例
-sh control.sh start    # 后台运行，默认每 1800 秒同步一次
-sh control.sh status  # 进程身份、同步状态、失败数和签名到期日
-sh control.sh stop    # 验证身份后 TERM 停止，不盲目 kill PID
+DISCOVERY_CONFIG='/var/local/family-calendar/discovery.json'
+CA_CERT='/etc/ssl/certs/ca-certificates.crt'
+FBINK='/mnt/us/usbnet/bin/fbink'
+TIMEZONE=Asia/Shanghai
+POWER_MODE=rtc
+INTERVAL=300
+RTC_INTERVAL=300
+SCREENSAVER_IMAGE=/mnt/us/linkss/screensavers/bg_ss00.png
+ALLOW_HTTP_DOWNLOAD=1
+HIDE_STATUS_BAR=1
 ```
 
-循环启动会先重绘缓存，再立即下载。只接受 HTTPS 的 HTTP 200，验证 PNG 头和尺寸，FBInk 成功后才原子替换 `calendar.png`；失败保留或恢复旧图。URL 通过私有 curl 配置传递，不出现在进程参数中。`state` 保存最近结果，`run.log` 达 128 KiB 轮转并仅保留一份旧日志。不自动配置开机启动。
+此前 awake 测试已因抑制休眠而停止。现按用户要求启动 RTC 验证：RTC_INTERVAL=300，每轮更新后释放唤醒锁、恢复状态栏、更新屏保入口并请求休眠，等待 RTC 下一轮唤醒。当前正在验证完整深度休眠 / 唤醒，不能仅凭 screenSaver 状态认定通过。
 
-后台模式明确忽略 INT/HUP，用 `control.sh stop` 发送 TERM 完成清理。退出时屏保恢复失败会非零返回，保留 `.running/powerd.previous` 和失败标记，并通过状态提示人工恢复；恢复成功后才可清理残留锁。
+本次复用了设备已有证书和 FBInk，没有安装依赖。持续唤醒模式每轮完成后等待 300 秒，实际两次完成间隔包含查询、下载与绘屏耗时。实测 22:06:34 与 22:11:36 两轮均成功，第二轮摘要发生变化且与最新发布一致；该结果属于此前 awake 测试。当前 RTC 实例不自动开机启动，已将原屏保备份到 list-demo/screensaver-before-rtc.png，启用 SCREENSAVER_IMAGE 后每轮把成功缓存图原子复制到原 linkss PNG 入口。
 
-残留 `.running` 锁不会自动清除。强杀或断电后，先核实原进程及 curl 子进程已退出、检查屏保恢复记录，再人工处理锁；不要在进程身份未确认时删除锁或发送信号。真实 PW3 的 `/proc`、curl/TLS、FBInk 和文件系统行为仍需验证。
+在 Kindle 上管理此实例：
+
+```sh
+sh /mnt/us/family-calendar/list-demo/control.sh status
+sh /mnt/us/family-calendar/list-demo/control.sh stop
+sh /mnt/us/family-calendar/list-demo/control.sh start
+# 单次运行前先停止后台实例
+sh /mnt/us/family-calendar/list-demo/run.sh --once
+```
+
+status 显示进程身份、最近成功时间、失败数和发现模式；RTC 模式等待时另显示 next_sync。时间输出为 UTC，不再显示固定签名链接的到期日。更改 config.sh 后需受控停止并重启；discovery.json 在每轮发现时读取。
+
+### 默认调度与下载行为
+
+[config.example.sh](../kindle/config.example.sh) 为专用日历提供默认配置：POWER_MODE=rtc、INTERVAL=1800、ALLOW_HTTP_DOWNLOAD=0、HIDE_STATUS_BAR=1。加载时 HIDE_STATUS_BAR 缺省为 0，避免未显式配置的实例暂停系统状态栏。
+
+RTC_INTERVAL=0 时，rtc 模式按 TIMEZONE 对齐时间槽：06:00–24:00 每整点与半点，00:00–06:00 在 00、02、04、06 点同步；启动仍立即同步。此模式不使用 INTERVAL；RTC_INTERVAL=0 使用上述昼夜时间槽，显式设置 60–86400 秒可覆盖为固定 RTC 间隔，当前测试为 300。awake 模式启动重绘缓存、立即同步，再在每轮完成后等待 INTERVAL；这是当前已实测的模式。
+
+图片只接受 HTTP 状态 200，curl 单次下载最多 40 秒，临时网络 / 5xx 错误最多重试一次、间隔 5 秒。检查文件大小及 PNG 头、尺寸、位深与颜色类型；FBInk 解码和绘屏成功后才替换 calendar.png。显示状态已确认且字节相同则跳过重绘；下载失败保留旧图，绘屏 / 保存失败尝试恢复缓存。
+
+状态原子写入 state；run.log 达 128 KiB 时轮转并保留一份旧日志。后台忽略 INT/HUP，使用 control.sh stop 发送 TERM 回收 curl / sleep 子进程、清理私有临时目录，并恢复原 Wi-Fi、电源和本进程暂停的状态栏。
+
+### 隐藏原生状态栏时间
+
+HIDE_STATUS_BAR=1 时，statusbar.sh 暂停已有的 JunoStatusBarDriver，再重绘图片，避免原生时间覆盖左上角标题。已在测试中启用并经截图确认时钟消失，停止实例后恢复原生状态栏；RTC 模式在每次休眠前也恢复状态栏，唤醒更新时再暂停。脚本只恢复自身暂停且启动身份仍匹配的驱动；原先已暂停的驱动不改变。
+
+若进程被强杀导致状态栏暂停残留，确认原日历进程已退出后可执行：
+
+```sh
+kill -CONT $(pidof JunoStatusBarDriver)
+```
+
+### RTC 与休眠展示
+
+power.sh 已实现：每轮后解除屏保抑制，在 active 时请求进入屏保；每 5 秒检查状态，只在 readyToSuspend 窗口设置相对秒数 rtcWakeup。提前唤醒后继续按时钟等待，到点后根据 powerd 状态唤醒（已 active 时不切换，其他已知休眠状态用 powerButton），等待 Wi-Fi（最多 15 次、间隔 2 秒）并恢复原 Wi-Fi 开关状态。调度失败退出并记录 wake_schedule_failed。
+
+这些行为已有本地模拟，目前在 PW3 验证完整的休眠、RTC 唤醒与 Wi-Fi 重连。该固件没有 wakeUp 属性，改用状态守卫的 powerButton；不能对 active 状态盲目触发切换。使用 linkss 时，先把原 PNG 入口备份到屏保目录之外，再设置 SCREENSAVER_IMAGE 为该已有 PNG 的绝对路径。脚本在成功绘屏并保存缓存后，先复制到入口旁的 .tmp 文件，再原子替换入口；写入失败报告 screensaver_save_failed，原入口不会被部分图片覆盖。留空则不更新屏保入口；代码不会安装或重启 linkss，也不停止 Xorg。停止后已设置的 RTC 可能再唤醒一次，但不会继续下载。
+
+屏保恢复失败会非零退出并保留 .running/powerd.previous 及失败标记。残留锁不会自动清除；先确认原进程及子进程退出、检查电源和状态栏恢复，再人工处理。不得在身份未确认时删锁或盲目发送信号。
+
+### 设备实时时钟实验
+
+clock-demo.sh 是独立的分钟级时钟实验，当前未启用，不是自动拉图入口。它使用固定底图、eips 与 FBInk 叠加时间，不负责云端换图，也没有接入 run.sh。曾在 PW3 验证局部时钟刷新，实屏残影与长期运行未验收。不与当前测试实例同时运行。
 
 ## 验证
 
-在仓库根目录、已激活 `.venv` 的终端中执行：
+在仓库根目录激活 .venv 后执行：
 
 ```sh
 python -m unittest discover -s tests -v
 sh -n kindle/run.sh
 sh -n kindle/common.sh
+sh -n kindle/power.sh
 sh -n kindle/control.sh
 sh -n kindle/config.example.sh
+sh -n kindle/discover.sh
+sh -n kindle/statusbar.sh
 ```
 
-回归覆盖图片灰度与日期边界、天气地区解析与回退、CalDAV 读取、PNG 编码与元数据、发布时序与恢复、Kodo 凭证和 HTTP 超时、CLI 文件权限，以及模拟 curl / FBInk 的设备下载与失败恢复。HTTP 测试需本地监听端口，设备测试需读取进程信息。通过测试不等于 Runner、Kodo 云端链路或实机已可用；上线前仍须完成 [实施与验收](../ARCHITECTURE.md#验收与实施顺序)。
+回归覆盖日期与灰阶、天气回退、CalDAV 读取、PNG 结构与元数据、不可变上传 / 同秒冲突 / 幂等、Kodo 签名与 HTTP 超时、list 分页与回溯、模拟下载 / 绘屏失败保留旧图、状态栏恢复及 RTC 边界。HTTP 测试需本地监听端口；设备模拟需 curl、OpenSSL、jq 和进程信息。测试通过不等于实机或 Runner 全部验收。
 
-[Mock 端到端测试](../tests/test_e2e.py) 在本机模拟腾讯 CalDAV 的 PROPFIND / REPORT / GET，以及 Kodo 上传和私有下载，校验鉴权、上传策略、ETag、PNG 内容与设备缓存。测试依次执行真实 `preview.py --caldav`、`scripts.publish_calendar` 和 Kindle `run.sh --once`；使用实际 CalDAV 客户端、Pillow、HTTP worker 和 curl，仅替换外部服务和 FBInk / lipc 硬件边界。覆盖成功、天气失败继续、空日历、来源失败、历史上传或读回失败、固定入口上传失败、重复发布幂等，以及设备下载 / 绘屏失败保留旧图。
+[Mock 端到端测试](../tests/test_e2e.py) 在本机模拟 CalDAV 的 PROPFIND / REPORT / GET、Kodo 上传 / 读回 / 分页 list，执行 sync_calendar、preview、发布 CLI、HTTP worker 和 Kindle run.sh --once。保留实际 CalDAV 客户端、Pillow、curl、OpenSSL 和 jq，只替换外部服务与 FBInk / lipc 硬件边界。覆盖成功、空日历、天气失败继续、来源 / 上传 / 读回 / list / 下载 / 绘屏失败，不代表真实服务权限或设备故障已验收。
 
-仅运行端到端测试：`python -m unittest discover -s tests -p test_e2e.py -v`。需要已有中文字体、curl、jq 和 OpenSSL，不需要真实账号或云端权限。测试专用 `PYTHONPATH` 将外部请求路由到 loopback，并阻止 Python 测试子进程访问非本机地址；生产代码不增加 mock 开关。图片、配置和虚构凭据均在临时目录中，结束后清理。该测试不验证真实 HTTPS/TLS、服务端兼容性、IAM 或墨水屏硬件。
+仅运行端到端测试：`python -m unittest discover -s tests -p test_e2e.py -v`。需要已有中文字体、curl、jq 和 OpenSSL，不需要真实账号或云端权限。测试专用 `PYTHONPATH` 将外部请求路由到 loopback，并阻止 Python 测试子进程访问非本机地址；生产代码不增加 mock 开关。图片、配置和虚构凭据均在临时目录中，结束后清理。
 
-[GitHub Actions 测试工作流](../.github/workflows/tests.yml) 在 push、pull request 和手动触发时，使用 GitHub 托管 Ubuntu 检查 Python 依赖一致性（`python -m pip check`）、全部 Kindle Shell 语法，并执行 `python -m unittest discover -s tests -v`，自动发现项目现有和新增测试。任一步骤失败都会使 CI 失败。测试工作流无需 Secrets，不发布图片；日历发布由独立的 `calendar.yml` 工作流执行。
+[GitHub Actions 测试工作流](../.github/workflows/tests.yml) 在 push、pull request 和手动触发时，使用 GitHub 托管 Ubuntu 检查 Python 依赖一致性（`python -m pip check`）、全部 Kindle Shell 语法，并执行全量测试。测试工作流无需 Secrets，不发布图片；日历发布由独立的 `calendar.yml` 工作流执行。
 
-2026-10-25 排查发现腾讯 CalDAV REPORT 对三个不同记录地址返回相同日程正文。逐条 GET 已验证能取回不同记录，接入层现按地址读取完整数据后再展开与去重；回归覆盖摘要重复及单条 GET 失败时停止生成。
+当前实机已验证：真实 HTTPS list、300 秒私有签名、经授权的 HTTP 图片下载、FBInk 绘屏与保存、两轮 5 分钟自动换图、状态栏隐藏。仍需完成最小权限、HTTPS 图片、Runner、RTC 与 48–72 小时跨天断网检查，见 [实施与验收](../ARCHITECTURE.md#验收与实施顺序)。

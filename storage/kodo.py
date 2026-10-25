@@ -16,7 +16,7 @@ from urllib.parse import quote, urlsplit
 from qiniu import Auth
 from qiniu.utils import etag_stream
 
-from publication import (Deadline, InvalidArtifact, MAX_IMAGE_BYTES, RUN_PATTERN,
+from publication import (Deadline, InvalidArtifact, MAX_IMAGE_BYTES,
                          StorageError, validate_artifact, validate_screen_id)
 
 
@@ -108,10 +108,12 @@ class KodoStorage:
         if not isinstance(key, str) or not key.startswith(prefix):
             raise ValueError("key_outside_screen")
         suffix = key[len(prefix):]
-        if suffix != "latest.png" and not re.fullmatch(r"history/\d{4}-\d{2}-\d{2}/" + RUN_PATTERN + r"-[1-9]\d{0,8}\.png", suffix):
+        match = re.fullmatch(r"(\d{8})/(\d{14})\.png", suffix)
+        if not match or match[1] != match[2][:8]:
             raise ValueError("invalid_object_key")
+        datetime.strptime(match[2], "%Y%m%d%H%M%S")
 
-    def download_url(self, key, *, expires=600):
+    def download_url(self, key, *, expires=60):
         self._check_key(key)
         return self.auth.private_download_url(self.config.domain + "/" + quote(key, safe="/"), expires=expires)
 
@@ -139,8 +141,8 @@ class KodoStorage:
         self.sleep(delay)
 
     def read_image(self, key):
-        url = self.download_url(key)
         for attempt in range(3):
+            url = self.download_url(key)
             retry_after = ""
             try:
                 status, headers, data = self.transport.request(

@@ -39,13 +39,15 @@ python preview.py --city 上海
 
 ## 当前状态
 
-已支持腾讯日历读取、天气查询和日历图片生成，并能在 Kindle 上作为静态屏保展示。月度主题和大字排版已接入。
+CalDAV、天气、日历渲染和 Kodo 时间戳图片发布已接通。本机每 5 分钟生成并上传；Kindle 曾以每轮完成后等待 300 秒的持续唤醒模式验证连续两轮换图，摘要与最新发布一致。该设备测试现已停止，恢复正常电源管理，不再自动拉取。设备复用 Shell、curl、OpenSSL 和 jq，无需 Python，日历运行时可隐藏原生状态栏时钟，停止后恢复。
 
-Kodo 发布、签名下载与定时拉取脚本已实现，自动更新的完整链路仍在联调。详细进展见 [验证记录](docs/superpowers/plans/2026-10-25-kodo-kindle-delivery.md#完成记录)。
+已验证的测试使用持续唤醒模式及用户允许的 HTTP 图片下载，list 仍走 HTTPS；真实 AK/SK 只存设备私有配置，禁止提交。未设置设备开机自启，未替换原静态屏保入口。操作与停止方法见 [当前测试实例](docs/USAGE.md#当前测试实例)。
+
+七牛 Runner 仅提供手动空日历 demo 工作流，尚未验收真实运行或启用生产 schedule。默认 RTC 昼夜调度已有代码，HTTPS 图片、最小权限边界、休眠唤醒及 48–72 小时稳定运行仍待完成，详见 [验证记录](docs/superpowers/plans/2026-10-25-kodo-kindle-delivery.md#完成记录)。
 
 ## 自动化测试
 
-激活 `.venv` 后运行 `python -m unittest discover -s tests -v`，执行项目全部测试。新增 Mock 端到端测试贯穿腾讯 CalDAV 发现与读取、PNG 渲染、Kodo 上传读回以及 Kindle 下载与模拟绘屏，使用虚构数据和本机服务，无需真实凭据。push、PR 和手动触发会运行 [测试工作流](.github/workflows/tests.yml)，包括依赖一致性、Shell 语法与全量测试检查。运行条件与边界见 [验证说明](docs/USAGE.md#验证)。
+激活 `.venv` 后运行 `python -m unittest discover -s tests -v`，执行项目全部测试。Mock 端到端测试覆盖 CalDAV 读取、PNG 渲染、Kodo 上传读回与分页 list，以及 Kindle 下载和模拟绘屏，使用虚构数据和本机服务，无需真实凭据。push、PR 和手动触发会运行 [测试工作流](.github/workflows/tests.yml)，包括依赖一致性、Shell 语法与全量测试检查。运行条件与边界见 [验证说明](docs/USAGE.md#验证)。
 
 ## 接下来
 

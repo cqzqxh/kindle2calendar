@@ -1,19 +1,19 @@
 # 家庭日历技术方案：GitHub Actions + Kodo
 
-状态：CalDAV 读取、天气查询、Kodo 发布、签名工具、Kindle 轮询与发布工作流已实现；真实云端发布和设备自动更新仍在联调。实际状态以 [README.md](README.md#当前状态) 为入口。
+状态：CalDAV、天气、Kodo 不可变图片发布、Kindle list 选择与轮询、手动演示工作流已有代码；Kindle 真实 list 和授权 HTTP 下载 / 绘屏与连续两轮 5 分钟更新已通过，HTTPS 图片、Runner 与长期轮询待验收。本文描述目标完整架构，实际状态以 [README.md](README.md#当前状态) 为入口。
 
 ## 目标与范围
 
 家庭成员通过已有日历产品维护安排，项目只负责读取、排版、发布和设备展示。无需购买云主机，无需维护常驻 Web 服务和业务数据库。执行费用受 GitHub Actions 额度和 Kodo 计费影响，不将其描述为永久免费。
 
-首版选择一个腾讯日历（CalDAV）、一台 Kindle PW3；飞书通过后续适配器接入。无需为演示额外加入 AI 或重做手机管理端。业务背景和价值见 [PRODUCT.md](PRODUCT.md)，显示规范见 [DESIGN.md](DESIGN.md)。
+首版选择腾讯日历（CalDAV）、一台 Kindle PW3；飞书通过后续适配器接入。无需为演示额外加入 AI 或重做手机管理端。业务背景和价值见 [PRODUCT.md](PRODUCT.md)，显示规范见 [DESIGN.md](DESIGN.md)。
 
 ## 架构与职责
 
 ```mermaid
 flowchart LR
     CAL["腾讯日历<br/>手机添加与更新日程"]
-    GH["GitHub Actions<br/>每 30 分钟定时触发"]
+    GH["GitHub Actions<br/>目标每 30 分钟触发"]
     RUN["GitHub Ubuntu Runner<br/>读取日历 · 生成 PNG"]
     KODO[("Kodo 对象存储<br/>保存最新日历图片")]
     KINDLE["Kindle 墨水屏<br/>定时下载并展示"]
@@ -35,14 +35,14 @@ flowchart LR
 | 腾讯日历 | 手机编辑、共享权限、日程保存 | 原始日程，作为唯一数据源 |
 | GitHub | 保存代码和工作流，定时调度，管理任务密钥 | 代码、任务状态和脱敏日志 |
 | GitHub 托管 Runner | 为 Job 分配 Ubuntu 环境，执行 Python 批处理，结束后清理 | 不依赖执行环境本地文件跨任务保存 |
-| Kodo | 保存已发布图片，供设备独立下载 | 当前图片和有限历史版本 |
+| Kodo | 保存已发布图片，供设备独立下载 | 不可变时间戳图片，建议配置 7 天生命周期 |
 | Kindle | 下载、验证、显示，失败保留上一张图 | 最近一次成功显示的 PNG 和设备配置 |
 
 发布和回归工作流均采用 GitHub 托管的 `ubuntu-24.04`，由 GitHub 按任务分配临时环境。
 
 GitHub Free 组织的私有仓库共享每月 2,000 分钟标准 Runner 额度；调度频率、任务耗时和其他工作流共同消耗额度，实际可用量以组织账单页面为准。
 
-腾讯日历使用 HTTPS CalDAV 地址、账号及专用密码接入，不依赖企业应用或 OAuth 权限。2026-10-25 已在本机验证连接、发现 4 个日历、读取并生成 1 条日期展示项。默认合并全部可发现日历，可通过 `CALDAV_CALENDAR_NAME` 指定唯一名称；账号下可见不代表家庭成员均可编辑，成员共享、增删改传播和服务端重复例外仍需单独验收。
+腾讯日历使用 HTTPS CalDAV 地址、账号及专用密码接入，不依赖企业应用或 OAuth 权限。2026-10-25 已在本机验证 CalDAV 发现、逐条读取与渲染，并用于每 5 分钟生成任务；日程数量随来源变化，不作为固定配置。默认合并全部可发现日历，可通过 `CALDAV_CALENDAR_NAME` 指定唯一名称；账号下可见不代表家庭成员均可编辑，成员共享、增删改传播和服务端重复例外仍需单独验收。
 
 ## 一次任务的处理流程
 
@@ -52,7 +52,7 @@ GitHub Free 组织的私有仓库共享每月 2,000 分钟标准 Runner 额度�
 4. `calendar_source.py` 通过 python-caldav 发现记录地址，逐条 GET 读取完整数据，再通过 recurring-ical-events 展开重复日程及单次例外，跳过取消项，保留来源 ID、开始、结束和全天标记，转换为渲染数据。全天结束日期排他，跨天事项拆分为覆盖日期的显示项，进行中事项保留到结束，近期安排按实例去重。浮动时间使用配置时区；旧 JSON 输入仍支持 `day/time/title/member`，未提供结束时间的定时事项按开始时间过滤。未展开的重复规则与解析错误必须终止生成。
 5. 解析 GitHub Actions 的天气地区配置：完整有效的经纬度优先；未填、只填一项或坐标非法时，均回退到城市名称查询坐标，再获取今天起三天的天气。图片展示配置或查询得到的地区名称。网络错误时显示“天气暂不可用”，不阻断日历发布；首版不依赖跨任务的本地天气缓存。
 6. 复用 Pillow 渲染，输出 1072 × 1448、16 级灰度 PNG，使用固定中文字体。校验尺寸、格式、灰度与文件大小。
-7. 上传不可变版本，确认成功后，再覆盖设备读取的 `latest.png`。任何读取不完整、渲染或发布错误都不主动删除上一版。
+7. 以 TIMEZONE 的日期目录和秒级时间戳文件名上传不可变 PNG，再读回校验；Kindle 通过完整 list 选择最新图。任何读取不完整、渲染或发布错误都不主动删除上一版。
 8. 日志仅记录活动数量、生成时间、对象 key、耗时和错误类别，不记录日程正文、令牌或签名 URL。
 
 CalDAV 返回空列表且查询完整成功时，允许发布空日历，以正确体现“全部删除”；接口失败、分页未完成或解析错误不能当作空列表。
@@ -60,6 +60,8 @@ CalDAV 返回空列表且查询完整成功时，允许发布空日历，以正�
 ## 调度与刷新
 
 当前 [`.github/workflows/calendar.yml`](.github/workflows/calendar.yml) 支持手动触发及默认分支定时调度，读取 CalDAV 后完成渲染、上传和读回。已固定 Action 提交、Python/Pillow/HTTP 依赖并安装中文字体。先完成手动验收和仓库 Variables 配置，再合入默认分支启用调度。
+
+本机验证由 LaunchAgent 每 300 秒调用 scripts.sync_calendar 生成并发布，Kindle list-demo 曾使用 POWER_MODE=awake、INTERVAL=300 验证，每轮完成后等待 300 秒；现已停止设备实例并恢复正常休眠，不再自动拉取。连续两轮完成时间相隔 302 秒，图片摘要与最新发布一致；不是云端 schedule 或 RTC 休眠验收。
 
 以下是接入真实来源后的生产调度目标，省略 `steps`，不能直接作为完整工作流运行：
 
@@ -89,20 +91,20 @@ jobs:
       TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Shanghai' }}
 ```
 
-生产启用前补齐真实来源读取与自动天气步骤，验证接口失败不会被当作空日历。首次先手动触发成功，再启用定时；演示工作流成功仅证明演示图片链路。
+生产启用前把已有 CalDAV / 天气模块接入工作流，验证接口失败不会被当作空日历。首次先手动触发成功，再启用定时；演示工作流成功仅证明演示图片链路。
 
 - 默认每小时第 7、37 分钟生成图片，每天计划 48 次。cron 使用默认 UTC；默认北京时间对应的分钟相同，图片日期按配置的 `TIMEZONE` 计算。
 - 定时工作流必须位于默认分支，只运行默认分支版本，不依赖代码变更。GitHub 最短调度间隔为 5 分钟。
 - GitHub 高负载时可能延迟或丢弃部分排队任务，不提供准点保证。公开仓库连续 60 天无活动会停用定时任务，家庭项目使用私有仓库。
 - 用单一工作流和固定 concurrency group 串行发布；GitHub 默认只保留一个待运行任务，新任务可替换待运行任务，不保证按触发顺序逐次执行。每次实际开始执行后重新读取最新日历，不发布旧任务预先生成的图片，不将工作流触发时间当作图片生成时间。
 - API 请求设置超时，对限流和暂时错误有限重试；整个任务最多 10 分钟，终止或超时不得主动删除已发布图片。
-- Kindle 默认每 30 分钟下载一次。两轮询叠加，修改到显示在正常条件下可能接近 60 分钟，另加调度、执行与缓存延迟；“每 30 分钟生成”不等于“30 分钟内一定看到”。
+- Kindle 默认 06:00–24:00 每 30 分钟唤醒下载，00:00–06:00 每 2 小时唤醒下载（00、02、04、06 点），与日历共用时区；夜间设备更新延迟相应延长。白天两轮询叠加，修改到显示在正常条件下可能接近 60 分钟，另加调度、执行与缓存延迟；“每 30 分钟生成”不等于“30 分钟内一定看到”。
 - 即使没有日程变更，也按计划刷新日期、今天高亮和天气；默认北京时间跨天后第一个计划任务约在 00:07，存在正常的跨天延迟。
 - 比赛现场手动触发工作流，完成后在设备执行一次下载，不等待日常周期。不为演示另建常驻回调服务。
 
 ## 天气地区配置
 
-天气地区在仓库 **Settings → Secrets and variables → Actions → Variables** 中维护，由工作流通过环境变量传入批处理，不写死在天气服务或 Kindle 脚本中。地区不是敏感信息，无需使用 Secrets。
+生产目标中，天气地区在仓库 **Settings → Secrets and variables → Actions → Variables** 中维护，由工作流通过环境变量传入批处理，不写死在天气服务或 Kindle 脚本中。地区不是敏感信息，无需使用 Secrets。本机读取同名环境变量；当前手动演示工作流尚未注入这组天气变量。
 
 | Actions Variable | 示例 | 含义 |
 | --- | --- | --- |
@@ -131,28 +133,23 @@ jobs:
 
 ## Kodo 发布与下载
 
-模块接口、图片元数据、发布失败恢复、设备轮询与验收用例见 [Kodo 图片发布与 Kindle 定时拉取详细设计](docs/superpowers/specs/2026-10-25-kodo-kindle-delivery-design.md)。发布与设备代码已实现，本地验证及外部待验收项见 [实施计划](docs/superpowers/plans/2026-10-25-kodo-kindle-delivery.md)。
+模块接口、图片元数据、不可变发布与设备失败恢复、设备轮询与验收用例见 [Kodo 图片发布与 Kindle 定时拉取详细设计](docs/superpowers/specs/2026-10-25-kodo-kindle-delivery-design.md)。发布与设备代码已实现，本地验证及外部待验收项见 [实施计划](docs/superpowers/plans/2026-10-25-kodo-kindle-delivery.md)。
 
-`publication.py` 管理发布状态机，`storage/kodo.py` 使用官方 SDK 签名和 ETag 算法。`KODO_UPLOAD_HOST` 明确指定 Bucket 所属区域的 HTTPS 上传入口；每次 HTTP 请求由独立子进程执行，关闭重定向、默认保持 TLS 校验，父进程限制下载 30 秒/上传 60 秒并服从共享总截止时间。仅临时联调可显式设置 `KODO_INSECURE_TLS=1` 跳过 Kodo 下载的证书校验，上传与 CalDAV 校验不变；手动工作流提供默认关闭的同用途开关，定时任务不启用。Job 最多 10 分钟，内部最多 9 分钟且预留恢复时间；重试不重置预算。
+`publication.py` 校验 PNG 并发布不可变对象，`storage/kodo.py` 使用官方 SDK 签名和 ETag 算法。`KODO_UPLOAD_HOST` 明确指定 Bucket 所属区域的 HTTPS 上传入口；每次 HTTP 请求由独立子进程执行，关闭重定向、默认保持 TLS 校验，父进程限制下载 30 秒/上传 60 秒并服从共享总截止时间。仅临时联调可显式设置 `KODO_INSECURE_TLS=1` 跳过 Kodo 下载的证书校验，上传与 CalDAV 校验不变；手动工作流提供默认关闭的同用途开关，定时任务不启用。Job 最多 10 分钟，内部最多 9 分钟；重试不重置预算。
 
-建议一个专用私有 Bucket，使用标准存储和可长期使用、证书受信任的 HTTPS 访问域名。30 天测试域名仅用于联调，不作为长期地址。
-
-对象布局示意：
+对象布局：
 
 ```text
-family-calendar/<screen-id>/latest.png
-family-calendar/<screen-id>/history/2026-10-24/<run-id>-<attempt>.png
+family-calendar/kindle-pw3/20261026/20261026212259.png
 ```
 
-`latest.png` 是设备固定入口，含义为最近一次成功生成的日历；正常运行时即当天日历。历史图用于验证与回滚，建议生命周期保留 7 天。图片生成时间体现在“近期安排”标题后的“更新于（HH:mm）”，运行失败时旧图可能跨天，不能宣称一定为当天。
+目录与文件时间均由 PNG 的生成时间转换到 TIMEZONE 得到，默认 Asia/Shanghai。每个 key 只新增，不覆盖；相同 key 相同内容幂等成功，同秒不同内容报告冲突。run-id 和 attempt 保留在 PNG 元数据中。建议对象生命周期保留 7 天。
 
-首版不让 Kindle 拼接日期访问历史图，以避免日期路径、签名和跨天失败处理的复杂度。生成任务先上传历史版本，再完整覆盖 `latest.png`；历史 key 包含工作流 run-id 和重跑 attempt，避免覆盖上次尝试。覆盖上传策略需明确允许更新固定 key。历史上传成功但 latest 更新失败时，设备继续读取上一版，下次任务重试。历史和 latest 两次写入不是跨对象事务，不承诺两者同时成功。
+上传前不请求新图地址，避免 CDN 缓存 404；上传后通过同一 key 读回并验证 PNG 和摘要。上传或验证不确定时非零退出，不删除已有图、不伪称回滚。对象上传完成即可被 list 发现，list 与发布者读回不是事务，设备仍需独立校验和绘屏。上传成功不等于设备已经显示。
 
-设备链路优先采用专用 HTTPS 源站域名。若接 CDN，需为 `latest.png` 配置不缓存或短缓存（目标不超过 60 秒）并实测覆盖后的可见性；历史版本可长缓存。不靠给已签名 URL 随意追加时间戳规避缓存，改变 URL 参数需要重新签名。
+Kindle 每轮调用七牛 list API，完整读取当天目录全部分页，再按文件名选最大时间戳；过滤非法、越屏幕和未来时间的 key。当天无图才逐日回溯，最多 7 天。列表失败或分页中断直接保留旧图，不能当作空目录继续查找。目录通常每天数十张图片，首版按天查询，不增加逐小时请求。下载地址每轮重新签名，图片不覆盖，因此不依赖 CDN 主动刷新；设备本地仍只保留一张成功显示的缓存图。
 
-生成时在 PNG 非可见元数据中记录 UTC `generated_at`、run-id 与 attempt，显示时间仍按配置时区渲染为 HH:mm。发布前读取并暂存上一版 latest 的字节及生成标识，校验待发布版本不会比已发布版本更旧；不为这些信息新增数据库或常驻服务。首次读取返回 404 视为尚无旧版，其他读取错误应终止发布。
-
-发布后通过固定下载入口验证响应、图片尺寸和内容摘要。若覆盖结果不确定或读回失败，任务记为失败；存在上一成功版本时按单一发布者约束恢复，并再次验证。首次发布没有旧版时明确报告无可恢复版本，不假装回滚成功。上传和读回成功只证明图片已发布，不证明 Kindle 已下载或显示；设备显示单独验收。设备不解析新增的 PNG 元数据，仍按普通 PNG 显示。
+默认要求 HTTPS 域名能访问私有图片；当前经用户允许的设备 demo 设置 ALLOW_HTTP_DOWNLOAD=1，暂用 HTTP 图片，list 始终强制 HTTPS。发布端 KODO_DOMAIN 仍须 HTTPS，与设备 discovery.json 中的下载域名可不同。测试域名只能在实际有效期、TLS 和鉴权限制内用于 demo，时间戳命名不解决域名到期或证书问题。
 
 ## 凭据与设备鉴权
 
@@ -160,20 +157,16 @@ family-calendar/<screen-id>/history/2026-10-24/<run-id>-<attempt>.png
 | --- | --- | --- |
 | `CALDAV_URL` / `CALDAV_USERNAME` / `CALDAV_PASSWORD` | GitHub Secrets | CalDAV HTTPS 服务地址、账号与专用密码；兼容本地 `TECENT_CalDAV_ADDR` / `TECENT_CalDAV_UID` / `TECENT_CalDAV_PASSWD` |
 | `CALDAV_CALENDAR_NAME` | 仓库 Variables | 可选，指定名称唯一的日历；默认合并全部可发现日历 |
-| `QINIU_ACCESS_KEY` / `QINIU_SECRET_KEY` | GitHub Secrets | 专用发布身份，限定 Bucket / 前缀的上传、读回校验和必要恢复权限 |
+| `QINIU_ACCESS_KEY` / `QINIU_SECRET_KEY` | GitHub Secrets | 专用发布身份，限定 Bucket / 前缀的新增上传与读回校验权限 |
 | `KODO_BUCKET` / `KODO_DOMAIN` / `SCREEN_ID` | 仓库 Variables | 发布目标与稳定设备标识，域名使用完整 HTTPS 地址 |
 | `KODO_UPLOAD_HOST` | 仓库 Variables | Bucket 区域对应的 HTTPS 上传入口，不通过 SDK 自动发现 |
 | 天气地区名称、经纬度、TIMEZONE | 仓库 Actions Variables，经工作流 env 传入 | 控制天气查询位置、地区标题和日期时区 |
-| `latest.png` 私有签名下载 URL 及到期日 | Kindle 本地受限配置 / 维护记录 | 只读取固定图片，不下发上传密钥 |
+| 设备 AK/SK、Bucket、screen-id、下载域名 | Kindle 本地 `discovery.json`（0600，Git 忽略） | demo 已授权设备保存专用最小权限身份，执行 list 与图片签名；不提交真实值 |
 | 受信任 CA 与 FBInk 路径 | Kindle 本地配置 | HTTPS 校验和绘屏 |
 
-首版采用配置时生成的固定对象签名 URL，建议有效期 30 天，截止前手动重新生成并更新设备配置。凭证允许在有效期内反复获取同一个 key 的新内容。此方案没有自动续期能力，是首版明确的维护项；有效期和最长允许期限需在所用下载链路实测。
+设备运行 `kindle/discover.sh`，使用已安装的 Shell、curl、OpenSSL 和 jq，无 Python 依赖。list 使用 Qiniu 管理签名，下载使用 300 秒 Kodo 私有签名，完整地址通过 0600 curl 配置文件传递，不放到命令行或日志。list 每页最多 1000 项，每天最多 100 页，列表请求共享 90 秒预算，每次 curl 有硬超时；不跟随重定向，不关闭 TLS。
 
-Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确。发布者私有下载签名及最小权限组合必须先验证，不能假定“仅有上传权限”足以完成读回和恢复。Python 天气 / Kodo SDK、中文字体及 TLS 版本在 Runner 环境中单独确认。
-
-签名 URL 是访问凭据，通过可信通道配置到设备，文件权限设为仅设备用户可读；通过 curl 配置文件传入，不输出到日志或作为工作流公开产物。泄露后需撤销对应授权或更换对象入口及签发密钥，不能假设签名 URL 有独立的一键撤销接口。设备不保存 CalDAV 凭据或 Kodo AK / SK。
-
-设备下载按 Kodo 官方签名 URL 协议实现，通过 curl 配置文件传入完整地址；日志不得回显签名查询参数或完整请求地址。
+真实 AK/SK 只放在设备本地私有配置，仓库的 `discovery.example.json` 仅占位。优先使用专用只读身份，按官方 IAM 接口权限限制目标空间的 list 和下载；不能把 S3 action 名直接当作原生 Kodo 权限，须实测授权结果。设备不保存 CalDAV 凭据。设备系统时间、TIMEZONE、受信任 CA、OpenSSL、jq、curl 和 FBInk 须逐项验证。
 
 真实家庭内容不使用公开 Bucket。比赛演示使用经同意的演示活动，不在代码仓库和任务附件中保存真实家庭日程。首版不上传包含私人内容的测试截图或 PNG 到 GitHub Artifacts。
 
@@ -185,17 +178,20 @@ Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确�
 | --- | --- |
 | `preview.py` | 已实现：CalDAV / JSON 日程与天气地区配置、本地 PNG 生成、`--screen-id` 发布元数据；同一生成时间用于画面及元数据 |
 | `calendar_source.py` | 已实现：CalDAV 只读发现、查询、日期与重复实例规范化 |
-| `publication.py` | 已实现：PNG/元数据校验、版本冲突检查、历史/固定入口发布、幂等及失败恢复 |
+| `publication.py` | 已实现：PNG/元数据校验、同秒冲突检查、不可变时间戳图片上传、读回与幂等 |
 | `scripts/publish_calendar.py` | 已实现：发布现成 PNG，输出脱敏 JSON 和明确退出码 |
 | `scripts/sign_download_url.py` | 已实现：签名写入新建 0600 文件，不输出完整 URL |
 | `storage/kodo.py` / `storage/http_worker.py` | 已实现：官方签名、上传响应校验、有限重试、HTTPS 读回与请求硬超时 |
-| `.github/workflows/calendar.yml` | 已实现手动演示、Runner 标签、Secrets 和串行发布；生产 schedule 待来源接入 |
+| `.github/workflows/calendar.yml` | 已实现 GitHub 托管 Runner、CalDAV 来源、手动触发、定时调度和串行发布；默认分支调度待手动发布验收及配置完成 |
 | `renderer.py` | 已有基础排版；已支持紧凑布局、全天、跨天及进行中活动 |
 | `weather.py` | 已有地区配置、坐标优先、城市查询回退、三天预报和失败降级 |
-| `kindle/run.sh` / `kindle/common.sh` | 已实现循环/单次下载、缓存重绘、图片头校验、锁、状态、日志和退出恢复 |
+| `kindle/run.sh` / `kindle/common.sh` / `kindle/power.sh` | 已实现昼夜调度、RTC 唤醒、Wi-Fi 等待与恢复、循环/单次下载、缓存重绘、图片头校验、锁、状态、日志和退出恢复；RTC 与屏保联动待实机验收 |
+| `kindle/discover.sh` | 已实现 list 完整分页、7 天回溯、时间戳选择和私有签名；真实 list 调用已通过；最小权限边界待验收 |
+| `kindle/statusbar.sh` | 已实现按进程身份暂停 / 恢复原生状态栏；当前测试截图已确认时钟不再覆盖日历 |
+| `scripts/sync_calendar.py` | 已实现本机 CalDAV → PNG → Kodo 单轮流程、文件锁与 240 秒总超时，已用于 5 分钟验证 |
 | `kindle/control.sh` | 已实现 start/status/stop，校验 PID、启动标识和脚本路径 |
-| `kindle/config.example.sh` | 已提供签名 URL、到期日、CA bundle、FBInk 和下载周期配置示例 |
-| 运行依赖 | 固定 Pillow、caldav、icalendar、recurring-ical-events、qiniu、requests 及 HTTP 传递依赖；当前验证环境 Python 3.12.15 |
+| `kindle/config.example.sh` | 已提供私有 discovery 配置路径、CA bundle、FBInk 和下载周期示例 |
+| 运行依赖 | 固定 Pillow、caldav、icalendar、recurring-ical-events、qiniu、requests 及 HTTP 传递依赖；当前本地 .venv 为 Python 3.14.5；发布工作流选定 3.12.15，Runner 未实测 |
 
 线上入口是执行后退出的 Python 批处理，日程以外部日历为唯一数据源，图片持久化到 Kodo。发布层只接收校验通过的 PNG；来源适配在渲染之前完成，后续飞书适配可沿用相同图片发布接口。本地直接通过 Python 运行脚本，不要求部署常驻服务。
 
@@ -203,11 +199,11 @@ Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确�
 
 1. **依赖验证**：用一个演示日历读取活动；手动工作流在 GitHub 托管 Runner 成功执行；Kodo 私有 HTTPS 图片能被 Kindle 实际下载、显示。并行于开发尽早完成设备运行环境检查。
 2. **云端闭环**：实现单次批处理，验证新增、修改、删除和空日历；重复、全天、跨天、月末及跨年事件须符合来源语义。
-3. **可靠发布**：验证分页失败不发布空图、天气失败仍可生成、覆盖更新可见、签名过期不替换旧图、旧版本拒绝覆盖、任务中断及重跑后的恢复。天气覆盖有效坐标优先、零值坐标、仅城市、无配置、单项 / 非法坐标回退、同名城市和地理编码失败。
+3. **可靠发布**：验证分页失败不发布空图、天气失败仍可生成、时间戳新图可见、list 分页失败保留旧图、同秒冲突拒绝覆盖、任务中断与幂等重跑。天气覆盖有效坐标优先、零值坐标、仅城市、无配置、单项 / 非法坐标回退、同名城市和地理编码失败。
 4. **实机试运行**：观察 48–72 小时，覆盖午夜切换、网络中断和恢复。设备需要 Wi-Fi，首版 USB 供电，不承诺深度休眠续航。
 5. **展示交付**：现场完成“手机修改 → 手动触发 → GitHub Actions 任务完成 → Kodo 新图片 → Kindle 新画面”，并保留运行失败时的说明和已成功生成的备用演示图。
 
-关键依赖是：共享日历的应用读取权限、仓库的 Runner 使用权限、Kodo 长期 HTTPS 域名，以及 PW3 的脚本 / TLS / FBInk 环境。实现阶段按这四项分别验证，不将云端上传成功等同于实机交付完成。
+关键依赖是：共享日历的应用读取权限、仓库的 Runner 使用权限、Kodo 可用 HTTPS 下载地址，以及 PW3 的脚本 / TLS / FBInk 环境。实现阶段按这四项分别验证，不将云端上传成功等同于实机交付完成。
 
 ## 官方依据
 
@@ -216,6 +212,6 @@ Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确�
 - [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)：串行运行、待运行任务替换与执行顺序。
 - [python-caldav 官方教程](https://caldav.readthedocs.io/stable/tutorial.html)：2026-10-25 核实日历发现、时间窗口查询和重复实例展开接口。
 - [Kodo 下载凭证](https://developer.qiniu.com/kodo/1202/download-token)：私有资源签名 URL 和到期校验。
-- [Kodo 上传策略](https://developer.qiniu.com/kodo/manual/put-policy)：固定 key 的覆盖和新增语义。
+- [Kodo 上传策略](https://developer.qiniu.com/kodo/manual/put-policy)：精确 key 和 insertOnly 新增语义。
 - [Open-Meteo 城市查询](https://open-meteo.com/en/docs/geocoding-api)：按城市名查询坐标、国家 / 行政区域限定和 GeoNames 来源。
 - [七牛测试域名规范](https://developer.qiniu.com/fusion/kb/1319/test-domain-access-restriction-rules)：测试域名生命周期 30 天。
