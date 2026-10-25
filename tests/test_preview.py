@@ -10,9 +10,20 @@ from unittest.mock import patch
 from PIL import Image
 from preview import load_events, load_weather, main
 from renderer import render_calendar
+from publication import validate_artifact
 
 
 class PreviewTests(unittest.TestCase):
+    def test_preview_contains_publishable_identity_and_matching_clock(self):
+        from datetime import datetime, timezone
+        with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
+            output = Path(folder) / "calendar.png"
+            self.assertEqual(main(["--screen-id", "demo-screen", "--now", "2026-10-25T12:00:00+08:00", "--output", str(output)]), 0)
+            now = datetime(2026, 10, 25, 4, tzinfo=timezone.utc)
+            image = validate_artifact(output.read_bytes(), expected_screen="demo-screen", now=now)
+            self.assertEqual(image.generated_at, now)
+            self.assertTrue(image.run_id.startswith("local-") or image.run_id.isdigit())
+
     def test_default_filename_uses_local_preview_time_and_keeps_previous_material(self):
         with tempfile.TemporaryDirectory() as folder, chdir(folder), redirect_stdout(io.StringIO()):
             args = ["--now", "2026-10-24T03:37:00+00:00", "--timezone", "Asia/Shanghai", "--offline"]
