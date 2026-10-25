@@ -1,6 +1,6 @@
 # Kodo 图片发布与 Kindle 定时拉取详细设计
 
-日期：2026-10-25。状态：设计完成，待实现与联调。现有代码以 `088ed9c` 为核对基线；本文中的新增模块、命令选项和配置项均为拟实现接口。
+日期：2026-10-25。状态：发布与设备程序已实现，真实 Kodo / Runner / Kindle PW3 待联调。设计初始基线为 `088ed9c`，设计提交为 `1632f89`；实现步骤和验证记录见 [实施计划](../plans/2026-10-25-kodo-kindle-delivery.md)。
 
 本文细化 [ARCHITECTURE.md](../../../ARCHITECTURE.md) 的发布与设备协议。主流程图、日历来源及天气规则沿用该文档；显示布局沿用 [DESIGN.md](../../../DESIGN.md)。
 
@@ -8,13 +8,13 @@
 
 完成“已生成的日历 PNG → Kodo 私有空间 → Kindle 定时下载并显示”。首版服务一个屏幕，默认每 30 分钟生成一次、每 30 分钟下载一次，使用 Wi-Fi 和 USB 供电。
 
-| 能力 | 当前已有 | 本次设计补充 |
+| 能力 | 原有基础 | 本次已实现 |
 | --- | --- | --- |
 | 图片生成 | Pillow 输出 1072 × 1448、16 级灰度 PNG | 生成标识、发布前完整校验 |
 | Kodo 发布 | 尚无代码 | 历史版本、固定入口覆盖、读回验证、失败恢复 |
 | Kindle 下载 | `run.sh` 循环下载、PNG 文件头检查、内容比较、FBInk 绘屏 | 尺寸与实际大小检查、单次模式、启动重绘、运行管理 |
 | 失败恢复 | 下载失败保留本地图片，绘屏失败尝试恢复 | 明确保存失败、首次运行、异常退出、云端结果不确定的行为 |
-| 定时任务 | 尚无工作流 | 约束调度、并发、超时和启用条件 |
+| 定时任务 | 尚无工作流 | 手动演示工作流、并发与超时；生产 schedule 待来源接入 |
 
 钉钉读取和自动天气查询作为上游接入独立实现。发布模块接收已经完整生成的图片，无法从 PNG 判断来源是否漏页；来源完整性必须由上游保证，读取失败时不得调用发布。完整成功的空日历允许发布。
 
@@ -68,11 +68,11 @@ Actions 使用 `GITHUB_RUN_ID` 与 `GITHUB_RUN_ATTEMPT`。本地预览生成 `lo
 
 渲染可见时间和元数据来自同一个 `now`：图上按 `TIMEZONE` 显示“更新于 HH:mm”，元数据保存它的 UTC 表示。上传和重试不得把旧图片的时间改成当前时间。
 
-新增 `publication.py` 的 `build_artifact(png_bytes, context)` 负责写入元数据，再执行完整校验并计算最终文件 SHA-256。历史对象、latest 和读回比较使用完全相同的最终字节，不在两次上传之间重新编码 PNG。
+`publication.py` 的 `build_artifact(png_bytes, context)` 负责写入元数据，再执行完整校验并计算最终文件 SHA-256。历史对象、latest 和读回比较使用完全相同的最终字节，不在两次上传之间重新编码 PNG。
 
 `preview.py` 保持离线生成行为，新增可选 `--screen-id`，默认 `preview`，写入上述本地生成标识。上传预览图时显式配置相同的 `SCREEN_ID`。已有无元数据的预览图继续可查看，但发布入口拒绝它，提示重新生成；不得从文件修改时间猜测图片日期。
 
-云端验证分两步：先用 Pillow 检查 PNG 结构，再重新打开并完整解码，检查尺寸、模式、帧数和灰度集合。仅检查前 8 字节不能替代完整验证。元数据中的屏幕、时间和生成身份也必须合法；图片时间超前当前可信 UTC 时间超过 5 分钟时拒绝发布并提示校时。
+云端先逐块检查 PNG 签名、IHDR 的真实位深与颜色类型、CRC、顺序及 IEND，拒绝截断和尾随字节；随后 Pillow verify 并重新打开完整解码，检查尺寸、模式、帧数和灰度集合。仅检查前 8 字节不能替代完整验证。元数据中的屏幕、时间和生成身份也必须合法；图片时间超前当前可信 UTC 时间超过 5 分钟时拒绝发布并提示校时。
 
 ### 3.3 新旧版本判定
 
@@ -93,31 +93,33 @@ Actions 使用 `GITHUB_RUN_ID` 与 `GITHUB_RUN_ATTEMPT`。本地预览生成 `lo
 
 ## 4. 云端模块与接口
 
-以下为拟新增或修改的文件，不表示已经存在：
+以下文件已实现，真实服务与硬件验证单独验收：
 
 | 文件 | 职责 |
 | --- | --- |
 | `publication.py` | 图片标识与完整校验、版本比较、发布步骤及恢复状态；通过存储接口调用 I/O |
 | `storage/__init__.py`、`storage/kodo.py` | Kodo 配置、上传凭证、私有读回、响应分类；屏蔽 SDK 细节 |
+| `storage/http_worker.py` | 每个子进程只执行一次 HTTP 请求，TLS 校验、响应限量与父进程硬超时 |
 | `scripts/__init__.py`、`scripts/publish_calendar.py` | 接收图片路径，加载配置，调用发布流程，输出脱敏结果与退出码 |
 | `scripts/sign_download_url.py` | 在可信电脑签发固定对象的设备下载 URL，保存到受限文件 |
 | `preview.py` | 离线生成时附加发布元数据，保留已有日程和天气输入行为 |
 | `kindle/run.sh`、`kindle/config.example.sh` | 扩展设备校验、单次执行、启动重绘及配置 |
 | `kindle/control.sh` | 启动、状态检查、停止；不安装系统启动项 |
+| `kindle/common.sh` | 配置读取、进程身份及状态读取等共享 POSIX 函数 |
 | `tests/test_publication.py`、`tests/test_kodo.py` | 发布顺序、幂等、异常结果、恢复和签名策略测试 |
+| `tests/test_cli.py` | 发布参数与退出码、签名文件权限及拒绝覆盖 |
 | `tests/test_device.py`、`tests/test_preview.py` | 扩展设备边界与图片元数据测试 |
 
 发布层的数据契约：
 
 - `GenerationContext`：带时区的 `now`、`screen_id`、`run_id`、`run_attempt`；`generated_at` 必须由该 `now` 转为 UTC 得到，调用方以同一 `now` 渲染图片。
 - `Artifact`：最终 `png_bytes`、`sha256`、`screen_id`、`generated_at`、`run_id`、`run_attempt`。
-- `StoredImage`：经过验证的 Artifact，以及读取的对象 key。
-- `PublishResult`：`status`、`history_key`、`latest_key`、`sha256`、`generated_at`、`recovery_status`；不包含 URL、token 或密钥。
-- `read_image(key)`：返回 `StoredImage`；只有明确 404 返回不存在，其他情况抛出分类错误。
-- `put_image(key, artifact, insert_only)`：上传指定字节，返回 key 和 Kodo 内容校验结果；结果不确定必须显式区分，不能当作未写入。
+- `PublishResult`：`status`、`history_key`、`latest_key`、`sha256`、`generated_at`、`exit_code`、`recovery_status`、`error_code`、`uncertain_write_confirmed`；不包含 URL、token 或密钥。
+- `read_image(key)`：返回经过验证的 `Artifact`；只有明确 404 返回 `None`，其他情况抛出分类错误。
+- `put_image(key, artifact, insert_only)`：上传指定字节并验证返回 key 和 Kodo 内容校验值，成功无返回值；异常携带固定错误类别及 retryable/uncertain 标记，不能把未确认当作未写入。
 - `publish_artifact(artifact, storage)`：执行下节步骤，决定发布状态和恢复行为。
 
-Kodo 使用官方 Python SDK 生成上传凭证、签名下载地址和内容校验值。SDK 与 HTTP 依赖版本在实现时选定、核实超时能力后固定，不在设计中编造已经验证的版本。SHA-256 是本项目读回摘要，不能拿它直接与 Kodo ETag 比较；Kodo 返回的 hash 使用对应官方算法核对。
+Kodo 使用官方 Python SDK `qiniu==7.18.0` 生成上传凭证、签名下载地址和内容校验值，HTTP 使用固定版本的 requests 及传递依赖（见 requirements.txt）。SDK 不执行网络请求，避免内部发现或重试绕过总预算。HTTP 子进程通过 stdin 接收参数，父进程限制完整请求时长并在超时后杀死、回收子进程。SHA-256 是本项目读回摘要，不能拿它直接与 Kodo ETag 比较；Kodo 返回的 hash 使用 SDK `etag_stream` 核对。
 
 ### 4.1 配置
 
@@ -126,6 +128,7 @@ Kodo 使用官方 Python SDK 生成上传凭证、签名下载地址和内容校
 | `QINIU_ACCESS_KEY` / `QINIU_SECRET_KEY` | Actions Secrets；本地可信进程环境 | 必填；不写命令参数和日志 |
 | `KODO_BUCKET` | Actions Variables | 必填，专用私有 Bucket |
 | `KODO_DOMAIN` | Actions Variables | 必填，长期 HTTPS 域名；不带查询串、片段或用户信息 |
+| `KODO_UPLOAD_HOST` | Actions Variables | 发布必填，Bucket 所属区域的 HTTPS 上传入口；签发下载 URL 时不需要 |
 | `SCREEN_ID` | Actions Variables / 本地环境 | 必填，与图片元数据一致 |
 | `TIMEZONE` | Actions Variables | 默认 `Asia/Shanghai`；非法时区终止生成 |
 | run-id / attempt | Actions 上下文或本地生成上下文 | 写入图片后保持不变 |
@@ -134,9 +137,9 @@ Kodo 使用官方 Python SDK 生成上传凭证、签名下载地址和内容校
 
 部署身份须具备相应对象的新增、覆盖和私有下载签名能力；恢复同样需要覆盖权限。设备仅得到固定对象的下载 URL，不得到上传能力或 SK。签名 URL 可能包含 AK 标识，但它不是独立下发的云端密钥对。
 
-### 4.2 拟提供的本地命令
+### 4.2 本地命令
 
-以下命令在实现后使用；当前仓库不能直接执行新增入口。先激活 `.venv`，由可信环境提供云端配置：
+先激活 `.venv` 并安装固定依赖，由可信环境提供云端配置（本例 `SCREEN_ID=demo-screen`）：
 
 ```sh
 python preview.py --screen-id demo-screen --output artifacts/calendar.png
@@ -166,6 +169,7 @@ python -m scripts.sign_download_url --expires-days 30 --output artifacts/kindle-
 - 暂时网络错误、HTTP 429 和可重试 5xx 最多尝试 3 次，间隔 2 秒、5 秒。合法 `Retry-After` 可在剩余任务预算内采用。鉴权错误、配置错误和输入校验错误立即失败。
 - 上传超时或连接断开先查询目标对象，不直接认定上传失败。历史对象读回一致可继续；最新对象的不确定结果按下表处理。重试使用同一候选字节和生成身份。
 - Actions Job 上限 10 分钟，包含安装依赖和来源读取。工作流最早脚本步骤记录一个 9 分钟内部截止时间，后续步骤共用，不能等到发布阶段才重新开始计时。正常发布阶段至多 480 秒，且必须在共享剩余预算中预留最多 90 秒恢复时间；覆盖前若连一次上传及恢复预算都不足，直接失败而不写 latest。按单调时钟核算，不让多层重试突破剩余预算；本地调用也设置总预算。
+- 恢复前探测最多 5 秒，恢复上传必须为最终读回留下 30 秒。仅余 90 秒时最坏分配为探测 5 秒、上传 55 秒、读回 30 秒；提前进入恢复可使用更多共享剩余时间，但单请求与全局上限不变。
 - 超时强杀、断电、Runner 丢失无法保证执行恢复代码。留下脱敏失败状态，由下一次任务重新读回判断；不宣称异常退出一定回滚。
 
 ### 5.3 失败结果
@@ -202,6 +206,7 @@ python -m scripts.sign_download_url --expires-days 30 --output artifacts/kindle-
 ```text
 /mnt/us/family-calendar/
   run.sh                 # 单次同步和循环同步
+  common.sh              # 共享配置、进程身份与状态函数
   control.sh             # 启动、状态、停止
   config.sh              # 受限本地配置
   ca-bundle.crt
@@ -210,9 +215,14 @@ python -m scripts.sign_download_url --expires-days 30 --output artifacts/kindle-
   .running/              # 原子目录锁和本次运行临时文件
     pid
     started              # 进程启动标识，用于防止 PID 复用
+    script               # 已规范化的 run.sh 路径
+    signal_policy        # managed / foreground 信号约定
+    ready                # 完成初始化的标记
     powerd.previous
+    powerd.restore_failed # 仅屏保恢复失败时保留
     curl.conf
     next.png
+    http.status
   state                  # 最后结果与连续失败次数，不保存 URL
   run.log                # 有限大小的脱敏日志
 ```
@@ -220,7 +230,7 @@ python -m scripts.sign_download_url --expires-days 30 --output artifacts/kindle-
 | 配置 | 约定 |
 | --- | --- |
 | `CALENDAR_URL` | 完整 HTTPS 私有签名 URL；禁止引号、反斜杠、CR/LF 注入 curl 配置 |
-| `URL_EXPIRES_AT` | 新增，Unix 秒数，必须与 URL 的 `e` 参数一致；展示时转为 UTC，仅作维护提醒 |
+| `URL_EXPIRES_AT` | 可省略并从 URL 的唯一 `e` 参数读取；显式填写时必须与 `e` 一致，Unix 秒数，展示时转为 UTC |
 | `CA_CERT` / `FBINK` | 保留现有配置，启动时检查可读 / 可执行 |
 | `INTERVAL` | 默认 `1800` 秒，整数且至少 60 秒 |
 
@@ -251,14 +261,16 @@ curl 的大小限制保留，并增加实际大小检查。安装验收要验证
 | 首次运行无旧图且绘屏失败 | 记录 `no_previous`，下轮继续；不虚构可恢复图 |
 | 首次运行绘屏成功但保存失败 | 显示状态标记未知，保留失败记录，下轮重试；不能记录为持久成功 |
 | state / 日志写入失败 | 不删除已保存的图片；尽力向 stderr 输出类别，不让状态文件故障触发图片回滚 |
-| 正常停止或 INT / TERM / HUP | 停止等待与后续下载，完成必要清理，恢复原屏保配置，释放本进程的锁 |
+| 正常停止 / TERM；前台运行收到可捕获的 INT / HUP | 停止等待与后续下载，完成必要清理，恢复原屏保配置，成功后释放本进程的锁 |
+| control 后台启动收到 INT / HUP | 明确忽略，保持后台运行；后台统一用 `control.sh stop` 的 TERM 停止 |
+| 退出时原屏保值恢复失败 | 非零退出，保留锁、原值和失败标记，state 记录 `power_restore_failed`，管理命令提示人工恢复 |
 | 强杀 / 断电 | 不承诺执行清理；重新启动先处理残留锁，本地最后成功图片作为恢复来源 |
 
 rename 只能保证同一文件系统下的文件替换，不等于断电持久化保证；是否需要设备支持的同步措施由断电验收结果决定。强杀后屏保设置可能仍被占用，恢复时使用保存的旧值，不写死恢复为 0。
 
 ### 6.4 运行管理和手动刷新
 
-拟提供：
+运行命令：
 
 ```sh
 sh control.sh start
@@ -269,6 +281,8 @@ sh run.sh --once
 
 `start` 以后台方式启动循环并等待启动确认，返回成功必须代表进程活着且已持有锁。`status` 检查 PID、启动标识及对应脚本身份，输出是否运行、最后结果、最后成功时间、连续失败次数和配置的 URL 到期时间，不输出 URL。
 
+POSIX 非交互后台 shell 可能在入口继承被忽略的 INT/HUP，不能可靠重置。因此后台启动明确忽略这两个信号，使用 TERM 清理；不宣称后台 INT/HUP 与前台相同。`start/status` 输出后台信号约定。屏保恢复失败时，保留 `powerd.previous` 及 `powerd.restore_failed`，清除含签名的临时文件，`status/stop` 提示恢复原值后再处理残留锁。
+
 `stop` 只有在 PID、启动标识和命令身份匹配时才发 TERM，有限等待退出，不默认使用 KILL。无法确认身份时返回明确错误，不能因为 PID 文件存在就杀进程。PW3 的 `/proc` 能力在安装验收时验证。
 
 `--once` 只执行一轮，成功更新或确认相同且可显示返回 0；同步失败返回非零，随后清理锁并恢复屏保配置。一次性模式退出后不承诺长期保持日历画面，长期展示使用循环模式。若循环已运行，单次模式因锁占用失败；现场刷新采用“受控停止 → 单次运行 → 重新启动循环”，不同时启两个下载器。
@@ -277,7 +291,7 @@ sh run.sh --once
 
 ## 7. Actions 接入与交付操作
 
-生产工作流仍使用 `.github/workflows/calendar.yml`、`[qiniu, ubuntu-24.04]`、`7,37 * * * *` 和 `workflow_dispatch`，固定 concurrency group，`cancel-in-progress: false`，整个生成和发布 Job 限时 10 分钟。
+生产目标仍使用 `.github/workflows/calendar.yml`、`[qiniu, ubuntu-24.04]`、`7,37 * * * *` 和 `workflow_dispatch`，固定 concurrency group，`cancel-in-progress: false`，整个生成和发布 Job 限时 10 分钟。已实现工作流只允许手动勾选 `confirm_empty_calendar`，且 `SCREEN_ID` 必须以 `demo-` 开头，不含 schedule。
 
 生产 Job 顺序为：checkout → 安装固定依赖和字体 → 本次完整读取来源 → 生成带元数据图片 → 调用发布模块 → 输出脱敏结果。来源失败终止，天气失败由上游生成不可用天气区域；不能让预览脚本的缺省空输入掩盖接入失败。
 

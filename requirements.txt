@@ -1,1 +1,7 @@
 Pillow==13.0.0
+qiniu==7.18.0
+requests==2.34.2
+urllib3==2.8.0
+certifi==2026.10.23
+charset-normalizer==3.5.2
+idna==3.20

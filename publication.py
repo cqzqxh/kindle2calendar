@@ -1,10 +1,12 @@
 """Validated calendar artifacts and single-writer publication with verified recovery."""
 from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import re
 import time
+import zlib
 
 from PIL import Image, PngImagePlugin, UnidentifiedImageError
 
@@ -33,9 +35,19 @@ class Deadline:
         self.end = start + seconds
         self.normal_end = min(start + 480, self.end - 90)
         self.recovering = False
+        self.phase_end = float("inf")
 
     def remaining(self):
-        return (self.end if self.recovering else self.normal_end) - self.clock()
+        return min(self.end if self.recovering else self.normal_end, self.phase_end) - self.clock()
+
+    @contextmanager
+    def limit(self, seconds):
+        previous = self.phase_end
+        self.phase_end = min(previous, self.clock() + max(0, seconds))
+        try:
+            yield
+        finally:
+            self.phase_end = previous
 
     def timeout(self, maximum):
         remaining = self.remaining()
@@ -85,6 +97,7 @@ class PublishResult:
     exit_code: int = 0
     recovery_status: str = "not_needed"
     error_code: str = ""
+    uncertain_write_confirmed: bool = False
 
 
 def validate_screen_id(value):
@@ -103,9 +116,47 @@ def _check_context(context):
         raise InvalidArtifact("timezone_required")
 
 
+def _check_png_structure(data):
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise InvalidArtifact("invalid_png_signature")
+    offset, saw_header, saw_data, data_finished = 8, False, False, False
+    while offset + 12 <= len(data):
+        size = int.from_bytes(data[offset:offset + 4], "big")
+        kind = data[offset + 4:offset + 8]
+        end = offset + 12 + size
+        if end > len(data) or not re.fullmatch(b"[A-Za-z]{4}", kind):
+            raise InvalidArtifact("invalid_png_chunk")
+        payload = data[offset + 8:offset + 8 + size]
+        crc = int.from_bytes(data[end - 4:end], "big")
+        if zlib.crc32(kind + payload) != crc:
+            raise InvalidArtifact("invalid_png_crc")
+        if not saw_header and kind != b"IHDR":
+            raise InvalidArtifact("missing_png_header")
+        if kind == b"IHDR":
+            if saw_header or size != 13 or payload[8:12] != bytes((8, 0, 0, 0)) or payload[12] not in (0, 1):
+                raise InvalidArtifact("invalid_png_header")
+            saw_header = True
+        elif kind == b"IDAT":
+            if data_finished:
+                raise InvalidArtifact("invalid_png_data_order")
+            saw_data = True
+        elif kind == b"IEND":
+            if size or not saw_data or end != len(data):
+                raise InvalidArtifact("invalid_png_end")
+            return
+        else:
+            if kind[0] < 97:  # No PLTE or unknown critical chunk in grayscale PNG.
+                raise InvalidArtifact("unexpected_png_chunk")
+            if saw_data:
+                data_finished = True
+        offset = end
+    raise InvalidArtifact("incomplete_png")
+
+
 def _decode(png_bytes):
     if not isinstance(png_bytes, bytes) or not 0 < len(png_bytes) <= MAX_IMAGE_BYTES:
         raise InvalidArtifact("invalid_image_size")
+    _check_png_structure(png_bytes)
     try:
         with Image.open(io.BytesIO(png_bytes)) as image:
             if image.format != "PNG" or image.size != (1072, 1448) or image.mode != "L":
@@ -175,7 +226,7 @@ def _ensure_history(candidate, storage, sleep, budget):
     if existing:
         if not _same(existing, candidate):
             raise StorageError("history_conflict")
-        return
+        return False
     for attempt in range(3):
         budget.timeout(1)
         error = None
@@ -187,7 +238,7 @@ def _ensure_history(candidate, storage, sleep, budget):
         if stored:
             if not _same(stored, candidate):
                 raise StorageError("history_conflict")
-            return
+            return bool(error and error.uncertain)
         if error is None or not error.retryable or attempt == 2:
             raise error or StorageError("history_unverified")
         _backoff(attempt, sleep, budget)
@@ -203,10 +254,11 @@ def _backoff(attempt, sleep, budget):
 def publish_artifact(candidate, storage, *, now=None, sleep=time.sleep, budget=None):
     candidate = validate_artifact(candidate.png_bytes, expected_screen=candidate.screen_id, now=now)
     budget = budget or getattr(storage, "deadline", None) or Deadline()
+    uncertain_confirmed = False
 
     def result(status, code=0, recovery="not_needed", error=""):
         return PublishResult(status, candidate.history_key, candidate.latest_key, candidate.sha256,
-                             candidate.generated_at.isoformat(), code, recovery, error)
+                             candidate.generated_at.isoformat(), code, recovery, error, uncertain_confirmed)
 
     try:
         previous = storage.read_image(candidate.latest_key)
@@ -218,7 +270,7 @@ def publish_artifact(candidate, storage, *, now=None, sleep=time.sleep, budget=N
         if candidate.generated_at <= previous.generated_at:
             return result("stale_rejected" if candidate.generated_at < previous.generated_at else "version_conflict", 3)
     try:
-        _ensure_history(candidate, storage, sleep, budget)
+        uncertain_confirmed = _ensure_history(candidate, storage, sleep, budget)
         current = storage.read_image(candidate.latest_key)
         if not _same(current, previous):
             return result("concurrent_change", 5, "not_attempted")
@@ -232,6 +284,16 @@ def publish_artifact(candidate, storage, *, now=None, sleep=time.sleep, budget=N
                       "previous_retained" if previous else "no_previous", "history_or_precheck_failed")
 
     for attempt in range(3):
+        if attempt:
+            try:
+                current = storage.read_image(candidate.latest_key)
+                if _same(current, candidate):
+                    uncertain_confirmed = True
+                    return result("published")
+                if not _same(current, previous):
+                    return result("concurrent_change", 5, "not_attempted")
+            except (StorageError, InvalidArtifact):
+                break
         write_error = None
         try:
             budget.require_overwrite_budget()
@@ -241,6 +303,7 @@ def publish_artifact(candidate, storage, *, now=None, sleep=time.sleep, budget=N
         try:
             current = storage.read_image(candidate.latest_key)
             if _same(current, candidate):
+                uncertain_confirmed |= bool(write_error and write_error.uncertain)
                 return result("published")
             if current is not None and not _same(current, previous):
                 return result("concurrent_change", 5, "not_attempted")
@@ -260,7 +323,9 @@ def _restore(candidate, previous, storage, budget, result):
     if previous is None:
         return result("failed_no_previous", 5, "no_previous", "latest_unverified")
     try:
-        current = storage.read_image(candidate.latest_key)
+        # Probe cannot consume the budget needed to restore and verify old bytes.
+        with budget.limit(5):
+            current = storage.read_image(candidate.latest_key)
         if _same(current, previous):
             return result("failed_previous_retained", 4, "previous_retained", "latest_unverified")
         if current is not None and not _same(current, candidate):
@@ -268,9 +333,11 @@ def _restore(candidate, previous, storage, budget, result):
     except (StorageError, InvalidArtifact):
         pass  # A verified single publisher may restore while reads are failing.
     try:
-        budget.timeout(60)
         try:
-            storage.put_image(candidate.latest_key, previous, insert_only=False)
+            # Keep a full readback window even when the recovery PUT stalls.
+            with budget.limit(budget.remaining() - 30):
+                budget.timeout(60)
+                storage.put_image(candidate.latest_key, previous, insert_only=False)
         except StorageError:
             pass  # An interrupted upload may nevertheless have committed.
         current = storage.read_image(candidate.latest_key)

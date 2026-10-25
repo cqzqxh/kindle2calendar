@@ -1,6 +1,6 @@
 # 家庭日历技术方案：七牛 Runner + Kodo
 
-状态：目标方案设计，尚未实现完整链路。当前代码与目标的差异以 [README.md](README.md#当前状态) 为入口。
+状态：Kodo 发布、签名工具、Kindle 轮询与手动演示工作流已实现；钉钉、自动天气查询及真实云端/设备联调未完成。本文描述目标完整架构，实际状态以 [README.md](README.md#当前状态) 为入口。
 
 ## 目标与范围
 
@@ -59,7 +59,9 @@ flowchart LR
 
 ## 调度与刷新
 
-计划新增 `.github/workflows/calendar.yml`。下面只展示调度、环境和并发配置，省略 `steps`，不能直接作为完整工作流运行：
+当前 [`.github/workflows/calendar.yml`](.github/workflows/calendar.yml) 只开放手动演示：显式确认空日历，限制 `demo-` 屏幕，完成渲染、上传和读回。已固定 Action 提交、Python/Pillow/HTTP 依赖并安装中文字体。真实来源未接入前，不开启周期性空日历发布。
+
+以下是接入真实来源后的生产调度目标，省略 `steps`，不能直接作为完整工作流运行：
 
 ```yaml
 name: 发布家庭日历
@@ -87,7 +89,7 @@ jobs:
       TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Shanghai' }}
 ```
 
-实施时补齐代码 checkout、固定版本的 Python / Pillow / 中文字体及批处理入口，使用经过核实的 Action 版本；任务只有完成读取、生成、上传和读回校验才可报告成功，不以占位输出制造成功状态。首次先手动触发成功，再启用定时。
+生产启用前补齐真实来源读取与自动天气步骤，验证接口失败不会被当作空日历。首次先手动触发成功，再启用定时；演示工作流成功仅证明演示图片链路。
 
 - 默认每小时第 7、37 分钟生成图片，每天计划 48 次。cron 使用默认 UTC；默认北京时间对应的分钟相同，图片日期按配置的 `TIMEZONE` 计算。
 - 定时工作流必须位于默认分支，只运行默认分支版本，不依赖代码变更。GitHub 最短调度间隔为 5 分钟。
@@ -129,7 +131,9 @@ jobs:
 
 ## Kodo 发布与下载
 
-模块接口、图片元数据、发布失败恢复、设备轮询与验收用例见 [Kodo 图片发布与 Kindle 定时拉取详细设计](docs/superpowers/specs/2026-10-25-kodo-kindle-delivery-design.md)。该详细设计是本节协议的实施细化，尚未实现。
+模块接口、图片元数据、发布失败恢复、设备轮询与验收用例见 [Kodo 图片发布与 Kindle 定时拉取详细设计](docs/superpowers/specs/2026-10-25-kodo-kindle-delivery-design.md)。发布与设备代码已实现，本地验证及外部待验收项见 [实施计划](docs/superpowers/plans/2026-10-25-kodo-kindle-delivery.md)。
+
+`publication.py` 管理发布状态机，`storage/kodo.py` 使用官方 SDK 签名和 ETag 算法。`KODO_UPLOAD_HOST` 明确指定 Bucket 所属区域的 HTTPS 上传入口；每次 HTTP 请求由独立子进程执行，关闭重定向、保持 TLS 校验，父进程限制下载 30 秒/上传 60 秒并服从共享总截止时间。Job 最多 10 分钟，内部最多 9 分钟且预留恢复时间；重试不重置预算。
 
 建议一个专用私有 Bucket，使用标准存储和可长期使用、证书受信任的 HTTPS 访问域名。30 天测试域名仅用于联调，不作为长期地址。
 
@@ -159,6 +163,7 @@ family-calendar/<screen-id>/history/2026-10-24/<run-id>-<attempt>.png
 | `DINGTALK_OPERATOR_UNION_ID` | GitHub Secrets，按接口需要配置 | 指定日历读取操作者，不与日历 ID 或组织内 userId 混用 |
 | `QINIU_ACCESS_KEY` / `QINIU_SECRET_KEY` | GitHub Secrets | 专用发布身份，限定 Bucket / 前缀的上传、读回校验和必要恢复权限 |
 | `KODO_BUCKET` / `KODO_DOMAIN` / `SCREEN_ID` | 仓库 Variables | 发布目标与稳定设备标识，域名使用完整 HTTPS 地址 |
+| `KODO_UPLOAD_HOST` | 仓库 Variables | Bucket 区域对应的 HTTPS 上传入口，不通过 SDK 自动发现 |
 | 天气地区名称、经纬度、TIMEZONE | 仓库 Actions Variables，经工作流 env 传入 | 控制天气查询位置、地区标题和日期时区 |
 | `latest.png` 私有签名下载 URL 及到期日 | Kindle 本地受限配置 / 维护记录 | 只读取固定图片，不下发上传密钥 |
 | 受信任 CA 与 FBInk 路径 | Kindle 本地配置 | HTTPS 校验和绘屏 |
@@ -179,18 +184,21 @@ Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确�
 
 | 模块 | 状态与工作内容 |
 | --- | --- |
-| `preview.py` | 已有：直接读取输入 JSON 并生成本地 PNG，不启动服务或访问网络 |
+| `preview.py` | 已实现：离线 PNG、发布元数据、`--screen-id`；同一生成时间用于画面及元数据 |
 | `calendar_sources/dingtalk.py` | 待新增：钉钉只读接入、身份与授权、分页、日期与重复实例规范化 |
-| `scripts/publish_calendar.py` | 待新增：校验并发布已生成 PNG 的批处理入口；来源读取与渲染由工作流前置生成步骤衔接 |
-| `storage/kodo.py` | 待新增：签名上传、历史版本、覆盖发布及读回校验 |
-| `.github/workflows/calendar.yml` | 待新增：定时 / 手动触发、Runner 标签、Secrets 和串行发布 |
+| `publication.py` | 已实现：PNG/元数据校验、版本冲突检查、历史/固定入口发布、幂等及失败恢复 |
+| `scripts/publish_calendar.py` | 已实现：发布现成 PNG，输出脱敏 JSON 和明确退出码 |
+| `scripts/sign_download_url.py` | 已实现：签名写入新建 0600 文件，不输出完整 URL |
+| `storage/kodo.py` / `storage/http_worker.py` | 已实现：官方签名、上传响应校验、有限重试、HTTPS 读回与请求硬超时 |
+| `.github/workflows/calendar.yml` | 已实现手动演示、Runner 标签、Secrets 和串行发布；生产 schedule 待来源接入 |
 | `renderer.py` | 已有基础排版；待适配外部日历的全天、跨天及进行中活动 |
 | `weather.py` | 已有纯数据解析；待新增地区配置、坐标优先、城市查询回退和预报请求 |
-| `kindle/run.sh` | 已支持 Kodo 签名 URL 下载、私有配置传参和失败恢复；待真实 HTTPS 与设备联调 |
-| `kindle/config.example.sh` | 已提供签名 URL、CA bundle、FBInk 和下载周期配置示例 |
-| 运行依赖 | 当前仅保留 Pillow；实施来源与发布模块时增加必要依赖并固定版本 |
+| `kindle/run.sh` / `kindle/common.sh` | 已实现循环/单次下载、缓存重绘、图片头校验、锁、状态、日志和退出恢复 |
+| `kindle/control.sh` | 已实现 start/status/stop，校验 PID、启动标识和脚本路径 |
+| `kindle/config.example.sh` | 已提供签名 URL、到期日、CA bundle、FBInk 和下载周期配置示例 |
+| 运行依赖 | 固定 Pillow、qiniu、requests 及 HTTP 传递依赖；当前验证环境 Python 3.12.15 |
 
-线上入口是执行后退出的 Python 批处理，日程以外部日历为唯一数据源，图片持久化到 Kodo。发布层只依赖统一后的日历数据，后续飞书适配沿用同一接口。本地直接通过 Python 运行脚本，不要求部署常驻服务。
+线上入口是执行后退出的 Python 批处理，日程以外部日历为唯一数据源，图片持久化到 Kodo。发布层只接收校验通过的 PNG；来源适配在渲染之前完成，后续飞书适配可沿用相同图片发布接口。本地直接通过 Python 运行脚本，不要求部署常驻服务。
 
 ## 验收与实施顺序
 

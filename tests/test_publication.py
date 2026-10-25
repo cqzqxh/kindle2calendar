@@ -1,5 +1,7 @@
 import io
 import unittest
+import struct
+import zlib
 from datetime import datetime, timedelta, timezone
 
 from PIL import Image
@@ -49,6 +51,22 @@ class MemoryStorage:
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_rejects_4bit_grayscale_even_when_pillow_reports_l(self):
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        raw = (b"\0" + b"\xff" * 536) * 1448
+        image = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1072, 1448, 4, 0, 0, 0, 0))
+        image += chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+        self.assertEqual(Image.open(io.BytesIO(image)).mode, "L")
+        with self.assertRaises(InvalidArtifact):
+            build_artifact(image, GenerationContext(NOW, "demo-screen", "run-1", 1))
+
+    def test_rejects_missing_or_corrupt_iend_crc_and_trailing_data(self):
+        image = artifact().png_bytes
+        for data in (image[:-4], image[:-1] + bytes([image[-1] ^ 1]), image + b"extra"):
+            with self.subTest(length=len(data)), self.assertRaises(InvalidArtifact):
+                validate_artifact(data, now=NOW)
+
     def test_roundtrip_and_utc_history(self):
         image = artifact()
         loaded = validate_artifact(image.png_bytes, expected_screen="demo-screen", now=NOW)
@@ -132,7 +150,25 @@ class PublicationTests(unittest.TestCase):
             s.objects[key] = candidate.png_bytes
             raise StorageError("timeout", retryable=True, uncertain=True)
         store.write_hook = committed_then_timeout
-        self.assertEqual(self.publish(image, store).status, "published")
+        result = self.publish(image, store)
+        self.assertEqual(result.status, "published")
+        self.assertTrue(result.uncertain_write_confirmed)
+
+    def test_retry_rechecks_latest_after_backoff(self):
+        previous, candidate, third = artifact(-2), artifact(0, "run-2"), artifact(1, "run-3")
+        store = MemoryStorage(previous)
+        failed = False
+        def fail_once(s, key, image, insert_only):
+            nonlocal failed
+            if key == candidate.latest_key and not failed:
+                failed = True
+                raise StorageError("timeout", retryable=True, uncertain=True)
+        def other_publisher(_):
+            store.objects[candidate.latest_key] = third.png_bytes
+        store.write_hook = fail_once
+        result = publish_artifact(candidate, store, now=NOW, sleep=other_publisher)
+        self.assertEqual(result.status, "concurrent_change")
+        self.assertEqual(store.objects[candidate.latest_key], third.png_bytes)
 
     def test_initial_read_failure_never_looks_like_empty_bucket(self):
         image, store = artifact(), MemoryStorage()
