@@ -2,7 +2,7 @@
 import calendar
 import io
 import os
-from datetime import date
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -32,7 +32,32 @@ def fit(draw, text, size, width):
     return text + "…"
 
 
-def render_calendar(events, now, weather=None):
+def upcoming_events(events, now, limit=10):
+    """CalDAV events retain ongoing events; legacy timed rows expire at start."""
+    today = now.date().isoformat()
+    def is_pending(event):
+        if event["day"] < today:
+            return False
+        if event.get("end") and event["end"] != event.get("start"):
+            return datetime.fromisoformat(event["end"]) > now
+        if not event["time"]:
+            return True
+        begin = datetime.fromisoformat(event["day"] + "T" + event["time"])
+        return begin.replace(tzinfo=now.tzinfo) >= now
+
+    pending = [event for event in events if is_pending(event)]
+    result, seen = [], set()
+    for event in sorted(pending, key=lambda event: (event["day"], event["time"], event["title"])):
+        if event.get("source_id"):
+            key = (event["source_id"], event["start"])
+            if key in seen:
+                continue
+            seen.add(key)
+        result.append(event)
+    return result[:limit]
+
+
+def render_calendar(events, now, weather=None, *, compact=True):
     image = Image.new("L", (WIDTH, HEIGHT), 255)
     d = ImageDraw.Draw(image)
     today = now.date()
@@ -42,57 +67,52 @@ def render_calendar(events, now, weather=None):
             value = fit(d, value, size, width)
         d.text((x, y), value, font=font(size), fill=fill)
 
-    text(48, 30, "家庭日历", 38)
-    clock = "更新于 " + now.strftime("%H:%M")
-    clock_size = 44
-    text(int(1024 - d.textlength(clock, font=font(clock_size))), 24, clock, clock_size)
-    text(48, 95, f"{today.year} 年 {today.month} 月", 72)
-    text(700, 102, f"{today.day:02d}", 82)
-    text(840, 130, "星期" + "一二三四五六日"[today.weekday()], 32)
-    d.line((48, 212, 1024, 212), fill=0, width=3)
+    text(48, 20 if compact else 30, "家庭日历", 30 if compact else 38)
+    text(48, 70 if compact else 95, f"{today.year} 年 {today.month} 月", 48 if compact else 72)
+    text(714 if compact else 700, 60 if compact else 102, f"{today.day:02d}", 64 if compact else 82)
+    text(840, 88 if compact else 130, "星期" + "一二三四五六日"[today.weekday()], 28 if compact else 32)
+    header_bottom = 144 if compact else 212
+    d.line((48, header_bottom, 1024, header_bottom), fill=0, width=3)
 
     weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(today.year, today.month)
     cell_width = 976 / 7
-    cell_height = 107 if len(weeks) == 6 else 128
+    cell_height = 420 / len(weeks) if compact else 107 if len(weeks) == 6 else 128
     by_day = {}
     for event in events:
         by_day.setdefault(event["day"], []).append(event)
     for col, label in enumerate("一二三四五六日"):
-        text(int(48 + col * cell_width + 52), 230, label, 26)
+        text(int(48 + col * cell_width + 52), 157 if compact else 230, label, 26)
     for row, week in enumerate(weeks):
         for col, day in enumerate(week):
             x = int(48 + col * cell_width)
-            y = 284 + row * cell_height
+            y = int((200 if compact else 284) + row * cell_height)
             d.line((x, y, int(x + cell_width), y), fill=160, width=1)
             if day.month != today.month:
                 continue
             if day == today:
-                d.rounded_rectangle((x + 4, y + 6, x + 62, y + 58), radius=5, fill=0)
-            text(x + 13, y + 7, str(day.day), 32, 255 if day == today else 0)
+                d.rounded_rectangle((x + 4, y + 4, x + 58, y + (42 if compact else 58)), radius=5, fill=0)
+            text(x + 13, y + (3 if compact else 7), str(day.day), 28 if compact else 32, 255 if day == today else 0)
             entries = by_day.get(day.isoformat(), [])
             if entries:
-                text(x + 6, y + 61, entries[0]["title"], 20, width=int(cell_width - 14))
+                text(x + 6, y + (44 if compact else 61), entries[0]["title"], 18 if compact else 20, width=int(cell_width - 14))
                 if len(entries) > 1:
-                    text(x + 75, y + 23, f"+{len(entries)-1}", 18)
+                    text(x + 75, y + (12 if compact else 23), f"+{len(entries)-1}", 18)
 
-    d.line((48, 947, 1024, 947), fill=0, width=3)
-    text(48, 969, "近期安排", 34)
-    upcoming = [e for e in events if e["day"] >= today.isoformat()]
+    agenda_top = 640 if compact else 947
+    d.line((48, agenda_top, 1024, agenda_top), fill=0, width=3)
+    text(48, agenda_top + 22, "近期安排", 34)
+    text(208, agenda_top + 30, "更新于（" + now.strftime("%H:%M") + "）", 26, 70)
+    upcoming = upcoming_events(events, now, limit=10 if compact else 3)
     if not upcoming:
-        text(48, 1050, "接下来的日子，留些时间给家人。", 30)
-        text(48, 1110, "在手机端添加第一条日程。", 25, 80)
-    limit = 3 if weather is not None else 5
-    for i, event in enumerate(upcoming[:limit]):
-        y = 1034 + 55 * i
+        text(48, agenda_top + 103, "接下来的日子，留些时间给家人。", 30)
+    for i, event in enumerate(upcoming):
+        y = 720 + 52 * i if compact else 1034 + 55 * i
         day = date.fromisoformat(event["day"])
         when = "今天" if day == today else f"{day.month}/{day.day}"
         text(48, y, when, 25)
         text(152, y, event["time"] or "全天", 25)
         text(260, y, event["title"], 28, width=520)
         text(813, y + 2, event["member"], 23, width=208)
-    if len(upcoming) > limit:
-        text(48, 1207 if weather is not None else 1352,
-             f"另有 {len(upcoming)-limit} 项安排，请在手机端查看", 22, 70)
     if weather is not None:
         d.line((48, 1260, 1024, 1260), fill=0, width=2)
         heading = weather["city"] + "天气"
