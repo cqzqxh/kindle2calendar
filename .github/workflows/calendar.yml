@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: '7,37 * * * *'
   workflow_dispatch:
+    inputs:
+      kodo_domain:
+        description: 本次测试的下载 HTTPS 域名
+        type: string
+        default: https://tne40b3qh.hd-bkt.clouddn.com
+      kodo_upload_host:
+        description: 本次测试的上传入口（华东浙江）
+        type: string
+        default: https://upload.qiniup.com
 
 permissions:
   contents: read
@@ -21,6 +30,8 @@ jobs:
         shell: bash
     env:
       QINIU_BUCKET: ${{ vars.QINIU_BUCKET || 'kindle2calendar' }}
+      KODO_DOMAIN: ${{ inputs.kodo_domain || vars.KODO_DOMAIN }}
+      KODO_UPLOAD_HOST: ${{ inputs.kodo_upload_host || vars.KODO_UPLOAD_HOST }}
       SCREEN_ID: ${{ vars.SCREEN_ID || 'pw3' }}
       TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Shanghai' }}
       WEATHER_CITY: ${{ vars.WEATHER_CITY }}
@@ -34,8 +45,6 @@ jobs:
           QINIU_SK: ${{ secrets.QINIU_SK }}
           TECENT_CalDAV_UID: ${{ secrets.TECENT_CalDAV_UID }}
           TECENT_CalDAV_PASSWD: ${{ secrets.TECENT_CalDAV_PASSWD }}
-          KODO_DOMAIN: ${{ vars.KODO_DOMAIN }}
-          KODO_UPLOAD_HOST: ${{ vars.KODO_UPLOAD_HOST }}
         run: |
           missing=0
           for name in QINIU_AK QINIU_SK TECENT_CalDAV_UID TECENT_CalDAV_PASSWD KODO_DOMAIN KODO_UPLOAD_HOST; do
@@ -56,6 +65,7 @@ jobs:
             /requirements.txt
             /scripts/
             /storage/
+            /assets/themes/
           sparse-checkout-cone-mode: false
 
       - name: Set up Python
@@ -76,6 +86,23 @@ jobs:
             fi
           fi
           test -r "$FONT_PATH"
+
+      - name: Check Kodo HTTPS before reading private calendar
+        run: |
+          python - <<'PY'
+          import os
+          from publication import StorageError
+          from storage.kodo import HTTPTransport
+
+          try:
+              status, _, _ = HTTPTransport().request(
+                  "GET", os.environ["KODO_DOMAIN"] + "/", timeout=30
+              )
+          except StorageError as error:
+              print(f"::error::Kodo HTTPS check failed: {error.code}")
+              raise SystemExit(1)
+          print(f"Kodo TLS verification passed; root HTTP status: {status}")
+          PY
 
       - name: Generate calendar from Tencent CalDAV
         env:
@@ -100,8 +127,6 @@ jobs:
           QINIU_ACCESS_KEY: ${{ secrets.QINIU_AK }}
           QINIU_SECRET_KEY: ${{ secrets.QINIU_SK }}
           KODO_BUCKET: ${{ env.QINIU_BUCKET }}
-          KODO_DOMAIN: ${{ vars.KODO_DOMAIN }}
-          KODO_UPLOAD_HOST: ${{ vars.KODO_UPLOAD_HOST }}
         run: python -m scripts.publish_calendar --image "$RUNNER_TEMP/calendar.png"
 
       - name: Remove private temporary image
