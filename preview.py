@@ -70,6 +70,7 @@ def main(argv=None):
     parser.add_argument("--timezone", default=os.environ.get("TIMEZONE") or "Asia/Shanghai")
     parser.add_argument("--now", help="指定预览时间，ISO 8601 格式；无时区时使用 --timezone")
     parser.add_argument("--screen-id", default="preview", help="图片所属屏幕，发布时须与 SCREEN_ID 一致")
+    parser.add_argument("--update-interval-minutes", type=int, default=30, help="图片显示的下次生成间隔，默认 30 分钟")
     parser.add_argument("--output", type=Path, help="输出路径；默认 artifacts/preview_YYYYMMDDHHmm.png")
     args = parser.parse_args(argv)
     if args.caldav and args.offline:
@@ -88,7 +89,10 @@ def main(argv=None):
             events = load_events(args.events)
         weather = load_weather(args.weather, args.city.strip(), now.date(), latitude=args.latitude,
                                longitude=args.longitude, timezone=args.timezone, offline=args.offline)
-        png = render_calendar(events, now, weather, compact=args.compact)
+        if args.update_interval_minutes < 1:
+            raise ValueError("invalid_update_interval")
+        png = render_calendar(events, now, weather, compact=args.compact,
+                              update_interval_minutes=args.update_interval_minutes)
         context = GenerationContext(now, args.screen_id,
                                     os.environ.get("GITHUB_RUN_ID") or f"local-{uuid.uuid4()}",
                                     int(os.environ.get("GITHUB_RUN_ATTEMPT") or "1"))

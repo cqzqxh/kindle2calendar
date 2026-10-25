@@ -139,4 +139,10 @@ sh -n kindle/config.example.sh
 
 回归覆盖图片灰度与日期边界、天气地区解析与回退、CalDAV 读取、PNG 编码与元数据、发布时序与恢复、Kodo 凭证和 HTTP 超时、CLI 文件权限，以及模拟 curl / FBInk 的设备下载与失败恢复。HTTP 测试需本地监听端口，设备测试需读取进程信息。通过测试不等于 Runner、Kodo 云端链路或实机已可用；上线前仍须完成 [实施与验收](../ARCHITECTURE.md#验收与实施顺序)。
 
+[Mock 端到端测试](../tests/test_e2e.py) 在本机模拟腾讯 CalDAV 的 PROPFIND / REPORT / GET，以及 Kodo 上传和私有下载，校验鉴权、上传策略、ETag、PNG 内容与设备缓存。测试依次执行真实 `preview.py --caldav`、`scripts.publish_calendar` 和 Kindle `run.sh --once`；使用实际 CalDAV 客户端、Pillow、HTTP worker 和 curl，仅替换外部服务和 FBInk / lipc 硬件边界。覆盖成功、天气失败继续、空日历、来源失败、历史上传或读回失败、固定入口上传失败、重复发布幂等，以及设备下载 / 绘屏失败保留旧图。
+
+仅运行端到端测试：`python -m unittest discover -s tests -p test_e2e.py -v`。需要已有中文字体、curl、jq 和 OpenSSL，不需要真实账号或云端权限。测试专用 `PYTHONPATH` 将外部请求路由到 loopback，并阻止 Python 测试子进程访问非本机地址；生产代码不增加 mock 开关。图片、配置和虚构凭据均在临时目录中，结束后清理。该测试不验证真实 HTTPS/TLS、服务端兼容性、IAM 或墨水屏硬件。
+
+[GitHub Actions 测试工作流](../.github/workflows/tests.yml) 在 push、pull request 和手动触发时，使用 GitHub 托管 Ubuntu 检查 Python 依赖一致性（`python -m pip check`）、全部 Kindle Shell 语法，并执行 `python -m unittest discover -s tests -v`，自动发现项目现有和新增测试。任一步骤失败都会使 CI 失败。工作流无需 Secrets，不发布图片；七牛 Runner 的手动发布演示入口保持独立。
+
 2026-10-25 排查发现腾讯 CalDAV REPORT 对三个不同记录地址返回相同日程正文。逐条 GET 已验证能取回不同记录，接入层现按地址读取完整数据后再展开与去重；回归覆盖摘要重复及单条 GET 失败时停止生成。

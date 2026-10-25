@@ -43,6 +43,10 @@ python preview.py --city 上海
 
 Kodo 发布、签名下载与定时拉取脚本已实现，自动更新的完整链路仍在联调。详细进展见 [验证记录](docs/superpowers/plans/2026-10-25-kodo-kindle-delivery.md#完成记录)。
 
+## 自动化测试
+
+激活 `.venv` 后运行 `python -m unittest discover -s tests -v`，执行项目全部测试。新增 Mock 端到端测试贯穿腾讯 CalDAV 发现与读取、PNG 渲染、Kodo 上传读回以及 Kindle 下载与模拟绘屏，使用虚构数据和本机服务，无需真实凭据。push、PR 和手动触发会运行 [测试工作流](.github/workflows/tests.yml)，包括依赖一致性、Shell 语法与全量测试检查。运行条件与边界见 [验证说明](docs/USAGE.md#验证)。
+
 ## 接下来
 
 - **语音记日程**：计划接入七牛灵矽，用说话的方式管理家庭安排。
