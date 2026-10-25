@@ -2,11 +2,12 @@
 import calendar
 import io
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+from monthly_themes import THEMES, theme_artwork
 from weather_icons import weather_icon
 
 WIDTH, HEIGHT = 1072, 1448
@@ -57,21 +58,33 @@ def upcoming_events(events, now, limit=10):
     return result[:limit]
 
 
-def render_calendar(events, now, weather=None, *, compact=True):
+def render_calendar(events, now, weather=None, *, compact=True, update_interval_minutes=30):
     image = Image.new("L", (WIDTH, HEIGHT), 255)
     d = ImageDraw.Draw(image)
     today = now.date()
 
-    def text(x, y, value, size, fill=0, width=None):
+    def text(x, y, value, size, fill=0, width=None, *, stroke=1):
+        value = " ".join(value.split())
         if width:
             value = fit(d, value, size, width)
-        d.text((x, y), value, font=font(size), fill=fill)
+        # A one-pixel outline keeps strokes legible with the sleeping panel's frontlight off.
+        d.text((x, y), value, font=font(size), fill=fill, stroke_width=stroke, stroke_fill=fill)
 
-    text(48, 20 if compact else 30, "家庭日历", 30 if compact else 38)
-    text(48, 70 if compact else 95, f"{today.year} 年 {today.month} 月", 48 if compact else 72)
-    text(714 if compact else 700, 60 if compact else 102, f"{today.day:02d}", 64 if compact else 82)
-    text(840, 88 if compact else 130, "星期" + "一二三四五六日"[today.weekday()], 28 if compact else 32)
+    theme = THEMES.get(today.month)
+    title = "家庭日历" + (f" · {theme[0]}" if theme else "")
+    text(48, 14 if compact else 30, title, 36)
+    text(48, 70 if compact else 95, f"{today.year} 年 {today.month} 月", 48 if compact or theme else 68)
+    text(714 if compact else 700, 48 if compact else 96, f"{today.day:02d}", 72 if compact or theme else 80)
+    text(840, 86 if compact else 130, "星期" + "一二三四五六日"[today.weekday()], 32)
     header_bottom = 144 if compact else 212
+    if theme:
+        _, caption, filename = theme
+        artwork = theme_artwork(filename, 264, 104 if compact else 150)
+        x = 424 + (264 - artwork.width) // 2
+        y = 6 + ((104 if compact else 150) - artwork.height) // 2
+        image.paste(artwork.convert("L"), (x, y), artwork.getchannel("A"))
+        caption_width = d.textlength(caption, font=font(22))
+        text(round(556 - caption_width / 2), 112 if compact else 170, caption, 22)
     d.line((48, header_bottom, 1024, header_bottom), fill=0, width=3)
 
     weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(today.year, today.month)
@@ -81,7 +94,7 @@ def render_calendar(events, now, weather=None, *, compact=True):
     for event in events:
         by_day.setdefault(event["day"], []).append(event)
     for col, label in enumerate("一二三四五六日"):
-        text(int(48 + col * cell_width + 52), 157 if compact else 230, label, 26)
+        text(int(48 + col * cell_width + 50), 151 if compact else 230, label, 30, stroke=0)
     for row, week in enumerate(weeks):
         for col, day in enumerate(week):
             x = int(48 + col * cell_width)
@@ -90,45 +103,48 @@ def render_calendar(events, now, weather=None, *, compact=True):
             if day.month != today.month:
                 continue
             if day == today:
-                d.rounded_rectangle((x + 4, y + 4, x + 58, y + (42 if compact else 58)), radius=5, fill=0)
-            text(x + 13, y + (3 if compact else 7), str(day.day), 28 if compact else 32, 255 if day == today else 0)
+                d.rounded_rectangle((x + 4, y + 3, x + 65, y + (43 if compact else 59)), radius=5, fill=0)
+            text(x + 13, y if compact else y + 7, str(day.day), 32 if compact else 36, 255 if day == today else 0, stroke=0)
             entries = by_day.get(day.isoformat(), [])
             if entries:
-                text(x + 6, y + (44 if compact else 61), entries[0]["title"], 18 if compact else 20, width=int(cell_width - 14))
+                text(x + 6, y + (40 if compact else 61), entries[0]["title"], 22, width=int(cell_width - 14), stroke=0)
                 if len(entries) > 1:
-                    text(x + 75, y + (12 if compact else 23), f"+{len(entries)-1}", 18)
+                    text(x + 78, y + (10 if compact else 23), f"+{len(entries)-1}", 22, width=54, stroke=0)
 
     agenda_top = 640 if compact else 947
     d.line((48, agenda_top, 1024, agenda_top), fill=0, width=3)
-    text(48, agenda_top + 22, "近期安排", 34)
-    text(208, agenda_top + 30, "更新于（" + now.strftime("%H:%M") + "）", 26, 70)
+    text(48, agenda_top + 18, "近期安排", 38)
+    next_update = now + timedelta(minutes=update_interval_minutes)
+    next_label = ("次日 " if next_update.date() != today else "") + next_update.strftime("%H:%M")
+    text(240, agenda_top + 30,
+         f"更新于:{now:%H:%M}, 下次更新:{next_label}", 26, 51)
     upcoming = upcoming_events(events, now, limit=10 if compact else 3)
     if not upcoming:
-        text(48, agenda_top + 103, "接下来的日子，留些时间给家人。", 30)
+        text(48, agenda_top + 103, "接下来的日子，留些时间给家人。", 32)
     for i, event in enumerate(upcoming):
         y = 720 + 52 * i if compact else 1034 + 55 * i
         day = date.fromisoformat(event["day"])
         when = "今天" if day == today else f"{day.month}/{day.day}"
-        text(48, y, when, 25)
-        text(152, y, event["time"] or "全天", 25)
-        text(260, y, event["title"], 28, width=520)
-        text(813, y + 2, event["member"], 23, width=208)
+        text(48, y + 4, when, 30)
+        text(164, y + 4, event["time"] or "全天", 30)
+        text(282, y, event["title"], 36, width=506)
+        text(816, y + 5, event["member"], 30, width=205)
     if weather is not None:
         d.line((48, 1260, 1024, 1260), fill=0, width=2)
         heading = weather["city"] + "天气"
-        text(48, 1272, heading, 28)
-        text(795, 1280, "open-meteo.com", 20, 70)
+        text(48, 1268, heading, 30, width=710)
+        text(785, 1280, "open-meteo.com", 22, 51)
         days = weather.get("days", [])[:3]
         if not days:
-            text(48, 1331, "天气暂不可用，下次同步时重试", 26, 70)
+            text(48, 1331, "天气暂不可用，下次同步时重试", 30, 51)
         for i, forecast in enumerate(days):
             x = 48 + i * 335
             forecast_day = date.fromisoformat(forecast["day"])
             label = "今天" if forecast_day == today else "星期" + "一二三四五六日"[forecast_day.weekday()]
-            text(x, 1320, f"{label} {forecast_day.month}/{forecast_day.day}", 23)
+            text(x, 1317, f"{label} {forecast_day.month}/{forecast_day.day}", 26)
             image.paste(weather_icon(forecast.get("code")), (x, 1359))
-            text(x + 72, 1350, forecast["label"], 27, width=243)
-            text(x + 72, 1391, f"{forecast['low']}~{forecast['high']}°", 24, width=243)
+            text(x + 72, 1350, forecast["label"], 30, width=243)
+            text(x + 72, 1394, f"{forecast['low']}~{forecast['high']}°", 30, width=243)
     # Quantize antialiasing to the panel's 16 gray levels.
     image = image.point(lambda value: round(value / 17) * 17)
     result = io.BytesIO()
