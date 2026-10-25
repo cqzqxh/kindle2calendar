@@ -1,10 +1,10 @@
-# 家庭日历技术方案：七牛 Runner + Kodo
+# 家庭日历技术方案：GitHub Actions + Kodo
 
 状态：CalDAV、天气、Kodo 不可变图片发布、Kindle list 选择与轮询、手动演示工作流已有代码；Kindle 真实 list 和授权 HTTP 下载 / 绘屏与连续两轮 5 分钟更新已通过，HTTPS 图片、Runner 与长期轮询待验收。本文描述目标完整架构，实际状态以 [README.md](README.md#当前状态) 为入口。
 
 ## 目标与范围
 
-家庭成员通过已有日历产品维护安排，项目只负责读取、排版、发布和设备展示。无需购买云主机，无需维护常驻 Web 服务和业务数据库。Runner / Sandbox 与 Kodo 资源费用按项目规模视为基本可忽略，不将其描述为永久免费。
+家庭成员通过已有日历产品维护安排，项目只负责读取、排版、发布和设备展示。无需购买云主机，无需维护常驻 Web 服务和业务数据库。执行费用受 GitHub Actions 额度和 Kodo 计费影响，不将其描述为永久免费。
 
 首版选择腾讯日历（CalDAV）、一台 Kindle PW3；飞书通过后续适配器接入。无需为演示额外加入 AI 或重做手机管理端。业务背景和价值见 [PRODUCT.md](PRODUCT.md)，显示规范见 [DESIGN.md](DESIGN.md)。
 
@@ -14,7 +14,7 @@
 flowchart LR
     CAL["腾讯日历<br/>手机添加与更新日程"]
     GH["GitHub Actions<br/>目标每 30 分钟触发"]
-    RUN["七牛 Runner<br/>读取日历 · 生成 PNG"]
+    RUN["GitHub Ubuntu Runner<br/>读取日历 · 生成 PNG"]
     KODO[("Kodo 对象存储<br/>保存最新日历图片")]
     KINDLE["Kindle 墨水屏<br/>定时下载并展示"]
 
@@ -25,22 +25,22 @@ flowchart LR
 
     classDef default fill:#f8fafc,stroke:#64748b,color:#0f172a;
     classDef qiniu fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
-    class RUN,KODO qiniu;
+    class KODO qiniu;
 ```
 
-日历产品负责编辑，GitHub 负责调度，七牛 Runner 按需生成图片，Kodo 持久保存，Kindle 独立拉取展示。首版先接腾讯日历 CalDAV；生成与下载失败时保留上一张成功图片。
+日历产品负责编辑，GitHub 负责调度并提供 Ubuntu Runner 按需生成图片，Kodo 持久保存，Kindle 独立拉取展示。首版先接腾讯日历 CalDAV；生成与下载失败时保留上一张成功图片。
 
 | 组件 | 职责 | 持久化内容 |
 | --- | --- | --- |
 | 腾讯日历 | 手机编辑、共享权限、日程保存 | 原始日程，作为唯一数据源 |
 | GitHub | 保存代码和工作流，定时调度，管理任务密钥 | 代码、任务状态和脱敏日志 |
-| 七牛 Runner | 为 Job 创建沙箱，执行 Python 批处理，结束后清理 | 不依赖沙箱本地文件跨任务保存 |
+| GitHub 托管 Runner | 为 Job 分配 Ubuntu 环境，执行 Python 批处理，结束后清理 | 不依赖执行环境本地文件跨任务保存 |
 | Kodo | 保存已发布图片，供设备独立下载 | 不可变时间戳图片，建议配置 7 天生命周期 |
 | Kindle | 下载、验证、显示，失败保留上一张图 | 最近一次成功显示的 PNG 和设备配置 |
 
-采用七牛托管 Runner 平台，不自行部署 runnerd。仓库需安装平台 GitHub App，并在 Repositories 确认 Runner readiness、有效 Sandbox 来源和 Runner 规格。
+发布和回归工作流均采用 GitHub 托管的 `ubuntu-24.04`，由 GitHub 按任务分配临时环境。
 
-2026-10-24 文档核实时，线上公开模板接口提供 `[qiniu, ubuntu-24.04]` 标签；具体仓库能否使用仍以平台准入和 readiness 为准。无需在个人电脑保持 Runner 在线。
+GitHub Free 组织的私有仓库共享每月 2,000 分钟标准 Runner 额度；调度频率、任务耗时和其他工作流共同消耗额度，实际可用量以组织账单页面为准。
 
 腾讯日历使用 HTTPS CalDAV 地址、账号及专用密码接入，不依赖企业应用或 OAuth 权限。2026-10-25 已在本机验证 CalDAV 发现、逐条读取与渲染，并用于每 5 分钟生成任务；日程数量随来源变化，不作为固定配置。默认合并全部可发现日历，可通过 `CALDAV_CALENDAR_NAME` 指定唯一名称；账号下可见不代表家庭成员均可编辑，成员共享、增删改传播和服务端重复例外仍需单独验收。
 
@@ -59,7 +59,7 @@ CalDAV 返回空列表且查询完整成功时，允许发布空日历，以正�
 
 ## 调度与刷新
 
-当前 [`.github/workflows/calendar.yml`](.github/workflows/calendar.yml) 只开放手动演示：显式确认空日历，限制 `demo-` 屏幕，完成渲染、上传和读回。已固定 Action 提交、Python/Pillow/HTTP 依赖并安装中文字体。真实来源未接入前，不开启周期性空日历发布。
+当前 [`.github/workflows/calendar.yml`](.github/workflows/calendar.yml) 支持手动触发及默认分支定时调度，读取 CalDAV 后完成渲染、上传和读回。已固定 Action 提交、Python/Pillow/HTTP 依赖并安装中文字体。先完成手动验收和仓库 Variables 配置，再合入默认分支启用调度。
 
 本机验证由 LaunchAgent 每 300 秒调用 scripts.sync_calendar 生成并发布，Kindle list-demo 曾使用 POWER_MODE=awake、INTERVAL=300 验证，每轮完成后等待 300 秒；现已停止设备实例并恢复正常休眠，不再自动拉取。连续两轮完成时间相隔 302 秒，图片摘要与最新发布一致；不是云端 schedule 或 RTC 休眠验收。
 
@@ -82,7 +82,7 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: [qiniu, ubuntu-24.04]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       WEATHER_CITY: ${{ vars.WEATHER_CITY }}
@@ -135,7 +135,7 @@ jobs:
 
 模块接口、图片元数据、不可变发布与设备失败恢复、设备轮询与验收用例见 [Kodo 图片发布与 Kindle 定时拉取详细设计](docs/superpowers/specs/2026-10-25-kodo-kindle-delivery-design.md)。发布与设备代码已实现，本地验证及外部待验收项见 [实施计划](docs/superpowers/plans/2026-10-25-kodo-kindle-delivery.md)。
 
-`publication.py` 校验 PNG 并发布不可变对象，`storage/kodo.py` 使用官方 SDK 签名和 ETag 算法。`KODO_UPLOAD_HOST` 明确指定 Bucket 所属区域的 HTTPS 上传入口；每次 HTTP 请求由独立子进程执行，关闭重定向、保持 TLS 校验，父进程限制下载 30 秒/上传 60 秒并服从共享总截止时间。Job 最多 10 分钟，内部最多 9 分钟；重试不重置预算。
+`publication.py` 校验 PNG 并发布不可变对象，`storage/kodo.py` 使用官方 SDK 签名和 ETag 算法。`KODO_UPLOAD_HOST` 明确指定 Bucket 所属区域的 HTTPS 上传入口；每次 HTTP 请求由独立子进程执行，关闭重定向、默认保持 TLS 校验，父进程限制下载 30 秒/上传 60 秒并服从共享总截止时间。仅临时联调可显式设置 `KODO_INSECURE_TLS=1` 跳过 Kodo 下载的证书校验，上传与 CalDAV 校验不变；手动工作流提供默认关闭的同用途开关，定时任务不启用。Job 最多 10 分钟，内部最多 9 分钟；重试不重置预算。
 
 对象布局：
 
@@ -182,7 +182,7 @@ Kindle 每轮调用七牛 list API，完整读取当天目录全部分页，再�
 | `scripts/publish_calendar.py` | 已实现：发布现成 PNG，输出脱敏 JSON 和明确退出码 |
 | `scripts/sign_download_url.py` | 已实现：签名写入新建 0600 文件，不输出完整 URL |
 | `storage/kodo.py` / `storage/http_worker.py` | 已实现：官方签名、上传响应校验、有限重试、HTTPS 读回与请求硬超时 |
-| `.github/workflows/calendar.yml` | 已实现手动演示、Runner 标签、Secrets 和串行发布；生产 schedule 待来源接入 |
+| `.github/workflows/calendar.yml` | 已实现 GitHub 托管 Runner、CalDAV 来源、手动触发、定时调度和串行发布；默认分支调度待手动发布验收及配置完成 |
 | `renderer.py` | 已有基础排版；已支持紧凑布局、全天、跨天及进行中活动 |
 | `weather.py` | 已有地区配置、坐标优先、城市查询回退、三天预报和失败降级 |
 | `kindle/run.sh` / `kindle/common.sh` / `kindle/power.sh` | 已实现昼夜调度、RTC 唤醒、Wi-Fi 等待与恢复、循环/单次下载、缓存重绘、图片头校验、锁、状态、日志和退出恢复；RTC 与屏保联动待实机验收 |
@@ -197,19 +197,17 @@ Kindle 每轮调用七牛 list API，完整读取当天目录全部分页，再�
 
 ## 验收与实施顺序
 
-1. **依赖验证**：用一个演示日历读取活动；手动工作流在七牛 Runner 成功执行；Kodo 私有 HTTPS 图片能被 Kindle 实际下载、显示。并行于开发尽早完成设备运行环境检查。
+1. **依赖验证**：用一个演示日历读取活动；手动工作流在 GitHub 托管 Runner 成功执行；Kodo 私有 HTTPS 图片能被 Kindle 实际下载、显示。并行于开发尽早完成设备运行环境检查。
 2. **云端闭环**：实现单次批处理，验证新增、修改、删除和空日历；重复、全天、跨天、月末及跨年事件须符合来源语义。
 3. **可靠发布**：验证分页失败不发布空图、天气失败仍可生成、时间戳新图可见、list 分页失败保留旧图、同秒冲突拒绝覆盖、任务中断与幂等重跑。天气覆盖有效坐标优先、零值坐标、仅城市、无配置、单项 / 非法坐标回退、同名城市和地理编码失败。
 4. **实机试运行**：观察 48–72 小时，覆盖午夜切换、网络中断和恢复。设备需要 Wi-Fi，首版 USB 供电，不承诺深度休眠续航。
-5. **展示交付**：现场完成“手机修改 → 手动触发 → 七牛任务完成 → Kodo 新图片 → Kindle 新画面”，并保留运行失败时的说明和已成功生成的备用演示图。
+5. **展示交付**：现场完成“手机修改 → 手动触发 → GitHub Actions 任务完成 → Kodo 新图片 → Kindle 新画面”，并保留运行失败时的说明和已成功生成的备用演示图。
 
 关键依赖是：共享日历的应用读取权限、仓库的 Runner 使用权限、Kodo 可用 HTTPS 下载地址，以及 PW3 的脚本 / TLS / FBInk 环境。实现阶段按这四项分别验证，不将云端上传成功等同于实机交付完成。
 
 ## 官方依据
 
-- [七牛 Runner 官方项目及运行原理](https://github.com/qiniu/ci-runner)：按 Job 创建临时 Sandbox，结束后清理。
-- [七牛托管版接入指南](https://runner.qiniuinc.com/docs/getting-started/hosted)。
-- [线上公开 Runner 模板](https://runner.qiniuinc.com/api/public/runner-templates)：已核实包含 `qiniu + ubuntu-24.04`。
+- [GitHub Actions 计费与免费额度](https://docs.github.com/en/billing/concepts/product-billing/github-actions)：标准 Runner 额度、仓库所有者计费及超额用量。
 - [GitHub schedule](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)：默认分支、调度间隔、延迟及公开仓库停用规则。
 - [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)：串行运行、待运行任务替换与执行顺序。
 - [python-caldav 官方教程](https://caldav.readthedocs.io/stable/tutorial.html)：2026-10-25 核实日历发现、时间窗口查询和重复实例展开接口。

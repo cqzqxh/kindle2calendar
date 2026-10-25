@@ -41,6 +41,7 @@ class KodoConfig:
     domain: str
     screen_id: str
     upload_host: str = ""
+    insecure_download_tls: bool = False
 
     @classmethod
     def from_env(cls, env=None, *, require_upload=True):
@@ -53,13 +54,19 @@ class KodoConfig:
         upload_host = env.get("KODO_UPLOAD_HOST", "")
         if upload_host or require_upload:
             upload_host = _https_origin(upload_host)
-        return cls(keys[0], keys[1], keys[2], domain, keys[3], upload_host)
+        insecure_download_tls = env.get("KODO_INSECURE_TLS", "0")
+        if insecure_download_tls not in ("0", "1"):
+            raise ValueError("invalid_kodo_insecure_tls")
+        return cls(keys[0], keys[1], keys[2], domain, keys[3], upload_host,
+                   insecure_download_tls == "1")
 
 
 class HTTPTransport:
-    def request(self, method, url, *, timeout, body=b"", fields=None, max_bytes=MAX_IMAGE_BYTES):
+    def request(self, method, url, *, timeout, body=b"", fields=None, max_bytes=MAX_IMAGE_BYTES,
+                verify_tls=True):
         payload = {"method": method, "url": url, "max_bytes": max_bytes,
-                   "body": base64.b64encode(body).decode("ascii"), "fields": fields or {}}
+                   "body": base64.b64encode(body).decode("ascii"), "fields": fields or {},
+                   "verify_tls": verify_tls}
         try:
             completed = subprocess.run(
                 [sys.executable, "-m", "storage.http_worker"], input=json.dumps(payload).encode(),
@@ -138,7 +145,9 @@ class KodoStorage:
             url = self.download_url(key)
             retry_after = ""
             try:
-                status, headers, data = self.transport.request("GET", url, timeout=self.deadline.timeout(30))
+                status, headers, data = self.transport.request(
+                    "GET", url, timeout=self.deadline.timeout(30),
+                    verify_tls=not self.config.insecure_download_tls)
                 if status == 404:
                     return None
                 if status == 200:

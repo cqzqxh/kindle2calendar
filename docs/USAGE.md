@@ -61,6 +61,7 @@ python preview.py --caldav
 | KODO_BUCKET | 专用私有 Bucket |
 | KODO_DOMAIN | 发布读回使用的 HTTPS 域名，不含路径、查询串或凭据 |
 | KODO_UPLOAD_HOST | Bucket 所属区域的 HTTPS 上传入口 |
+| KODO_INSECURE_TLS | 默认 0；仅临时联调设为 1，跳过 Kodo 下载证书校验；上传和 CalDAV 仍校验证书 |
 | SCREEN_ID | 固定屏幕标识，必须与 PNG 元数据一致 |
 | TIMEZONE | 日历、天气和对象日期的共同 IANA 时区，默认 Asia/Shanghai |
 
@@ -86,11 +87,13 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.kindle2calendar.local-
 # 重新启动：使用 bootstrap 代替 bootout
 ```
 
-### 七牛 Runner 手动演示
+### GitHub Actions 发布
 
-[发布工作流](../.github/workflows/calendar.yml) 使用 `[qiniu, ubuntu-24.04]`，仅允许显式勾选空日历确认、向 demo- 屏幕发布。已实现上传和读回；实际仓库 Runner readiness 与运行尚未验收。不上传私人图片到 GitHub Artifacts。
+[发布工作流](../.github/workflows/calendar.yml) 使用 GitHub 托管的 `ubuntu-24.04`。Secrets 使用 `QINIU_AK`、`QINIU_SK`、`TECENT_CalDAV_UID` 和 `TECENT_CalDAV_PASSWD`；Variables 使用 `QINIU_BUCKET`、`TECENT_CalDAV_ADDR`、`KODO_DOMAIN` 和 `KODO_UPLOAD_HOST`。工作流读取真实 CalDAV 日程，生成不可变图片并串行发布，默认 `SCREEN_ID=pw3`，不上传私人图片到 GitHub Artifacts。
 
-CalDAV 和天气模块已有实现，但尚未接入此手动工作流；当前也未启用生产 schedule。接入真实来源并验收后，生产目标 cron 为 `7,37 * * * *`，不能启用周期性空日历发布。
+手动运行可通过 `kodo_domain`、`kodo_upload_host` 指定本次测试地址；先保持 `insecure_kodo_tls=false` 验证正常 HTTPS，确认 `tls_error` 后可显式开启该开关临时复测。开关默认关闭，只影响 Kodo 下载，无法解决访问权限、域名有效期或缓存问题。完成手动发布验收并配置仓库 Variables 后，再合入默认分支启用 `7,37 * * * *`；定时任务保持证书校验。
+
+GitHub Free 组织的私有仓库共享每月 2,000 分钟标准 Runner 额度，实际剩余额度以组织账单页面为准。按每天 48 次调度、30 天计算为每月 1,440 次任务，还需考虑每次执行时间及其他工作流的用量。见 [GitHub 官方额度说明](https://docs.github.com/en/billing/reference/product-usage-included)。
 
 ## 设备凭据与列表查询
 
@@ -216,6 +219,6 @@ sh -n kindle/statusbar.sh
 
 仅运行端到端测试：`python -m unittest discover -s tests -p test_e2e.py -v`。需要已有中文字体、curl、jq 和 OpenSSL，不需要真实账号或云端权限。测试专用 `PYTHONPATH` 将外部请求路由到 loopback，并阻止 Python 测试子进程访问非本机地址；生产代码不增加 mock 开关。图片、配置和虚构凭据均在临时目录中，结束后清理。
 
-[GitHub Actions 测试工作流](../.github/workflows/tests.yml) 在 push、pull request 和手动触发时，使用 GitHub 托管 Ubuntu 检查 Python 依赖一致性（`python -m pip check`）、全部 Kindle Shell 语法，并执行全量测试。工作流无需 Secrets，不发布图片；七牛 Runner 的手动发布演示入口保持独立。
+[GitHub Actions 测试工作流](../.github/workflows/tests.yml) 在 push、pull request 和手动触发时，使用 GitHub 托管 Ubuntu 检查 Python 依赖一致性（`python -m pip check`）、全部 Kindle Shell 语法，并执行全量测试。测试工作流无需 Secrets，不发布图片；日历发布由独立的 `calendar.yml` 工作流执行。
 
 当前实机已验证：真实 HTTPS list、300 秒私有签名、经授权的 HTTP 图片下载、FBInk 绘屏与保存、两轮 5 分钟自动换图、状态栏隐藏。仍需完成最小权限、HTTPS 图片、Runner、RTC 与 48–72 小时跨天断网检查，见 [实施与验收](../ARCHITECTURE.md#验收与实施顺序)。

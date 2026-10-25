@@ -35,7 +35,7 @@ python preview.py --city 上海
 
 目标是：**手机上改日程，Kindle 定时更新。**
 
-腾讯日历保存安排，GitHub Actions 定时触发七牛 Runner 生成图片，Kodo 存图，Kindle 下载展示。任务按需运行，无需常驻云主机。
+腾讯日历保存安排，GitHub Actions 在 GitHub 托管的 Ubuntu Runner 上定时生成图片，Kodo 存图，Kindle 下载展示。任务按需运行，无需常驻云主机。
 
 ## 当前状态
 
