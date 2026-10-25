@@ -26,7 +26,7 @@ def main(argv=None):
                 raise ValueError("invalid_deadline")
         deadline = Deadline(min(540, remaining))
         storage = KodoStorage(config, deadline=deadline)
-        result = publish_artifact(image, storage, budget=deadline)
+        result = publish_artifact(image, storage, budget=deadline, timezone_name=os.environ.get("TIMEZONE", "Asia/Shanghai"))
         print(json.dumps(asdict(result), ensure_ascii=False))
         return result.exit_code
     except (ValueError, OSError):

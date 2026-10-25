@@ -1,6 +1,6 @@
-"""Validated calendar artifacts and single-writer publication with verified recovery."""
+"""Validated calendar artifacts and immutable timestamped publication."""
 from dataclasses import dataclass
-from contextlib import contextmanager
+from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
@@ -28,36 +28,19 @@ class StorageError(Exception):
 
 
 class Deadline:
-    """Normal operations leave time for recovery; recovery never resets the clock."""
+    """One shared deadline for upload, verification and finite retries."""
     def __init__(self, seconds=540, *, clock=time.monotonic):
         self.clock = clock
-        start = clock()
-        self.end = start + seconds
-        self.normal_end = min(start + 480, self.end - 90)
-        self.recovering = False
-        self.phase_end = float("inf")
+        self.end = clock() + seconds
 
     def remaining(self):
-        return min(self.end if self.recovering else self.normal_end, self.phase_end) - self.clock()
-
-    @contextmanager
-    def limit(self, seconds):
-        previous = self.phase_end
-        self.phase_end = min(previous, self.clock() + max(0, seconds))
-        try:
-            yield
-        finally:
-            self.phase_end = previous
+        return self.end - self.clock()
 
     def timeout(self, maximum):
         remaining = self.remaining()
         if remaining <= 0:
             raise StorageError("deadline_exceeded")
         return min(maximum, remaining)
-
-    def require_overwrite_budget(self):
-        if self.remaining() < 60:
-            raise StorageError("insufficient_recovery_budget")
 
 
 @dataclass(frozen=True)
@@ -77,27 +60,19 @@ class Artifact:
     run_attempt: int
     sha256: str
 
-    @property
-    def latest_key(self):
-        return f"family-calendar/{self.screen_id}/latest.png"
-
-    @property
-    def history_key(self):
-        return (f"family-calendar/{self.screen_id}/history/{self.generated_at:%Y-%m-%d}/"
-                f"{self.run_id}-{self.run_attempt}.png")
+    def object_key(self, timezone_name="Asia/Shanghai"):
+        local = self.generated_at.astimezone(ZoneInfo(timezone_name))
+        return f"family-calendar/{self.screen_id}/{local:%Y%m%d}/{local:%Y%m%d%H%M%S}.png"
 
 
 @dataclass(frozen=True)
 class PublishResult:
     status: str
-    history_key: str
-    latest_key: str
+    object_key: str
     sha256: str
     generated_at: str
     exit_code: int = 0
-    recovery_status: str = "not_needed"
     error_code: str = ""
-    uncertain_write_confirmed: bool = False
 
 
 def validate_screen_id(value):
@@ -216,133 +191,38 @@ def validate_artifact(png_bytes, *, expected_screen=None, now=None):
                     context.run_attempt, hashlib.sha256(png_bytes).hexdigest())
 
 
-def _same(left, right):
-    return (left is None and right is None) or (
-        left is not None and right is not None and left.sha256 == right.sha256)
-
-
-def _ensure_history(candidate, storage, sleep, budget):
-    existing = storage.read_image(candidate.history_key)
-    if existing:
-        if not _same(existing, candidate):
-            raise StorageError("history_conflict")
-        return False
-    for attempt in range(3):
-        budget.timeout(1)
-        error = None
-        try:
-            storage.put_image(candidate.history_key, candidate, insert_only=True)
-        except StorageError as caught:
-            error = caught
-        stored = storage.read_image(candidate.history_key)
-        if stored:
-            if not _same(stored, candidate):
-                raise StorageError("history_conflict")
-            return bool(error and error.uncertain)
-        if error is None or not error.retryable or attempt == 2:
-            raise error or StorageError("history_unverified")
-        _backoff(attempt, sleep, budget)
-
-
-def _backoff(attempt, sleep, budget):
-    seconds = (2, 5)[attempt]
-    if budget.remaining() <= seconds:
-        raise StorageError("deadline_exceeded")
-    sleep(seconds)
-
-
-def publish_artifact(candidate, storage, *, now=None, sleep=time.sleep, budget=None):
+def publish_artifact(candidate, storage, *, now=None, sleep=time.sleep, budget=None,
+                     timezone_name="Asia/Shanghai"):
+    """Insert one immutable image. Never probe a missing key through CDN before upload."""
     candidate = validate_artifact(candidate.png_bytes, expected_screen=candidate.screen_id, now=now)
+    key = candidate.object_key(timezone_name)
     budget = budget or getattr(storage, "deadline", None) or Deadline()
-    uncertain_confirmed = False
 
-    def result(status, code=0, recovery="not_needed", error=""):
-        return PublishResult(status, candidate.history_key, candidate.latest_key, candidate.sha256,
-                             candidate.generated_at.isoformat(), code, recovery, error, uncertain_confirmed)
-
-    try:
-        previous = storage.read_image(candidate.latest_key)
-    except (StorageError, InvalidArtifact):
-        return result("failed_read_previous", 5, "unverified", "previous_unreadable")
-    if previous and not _same(previous, candidate):
-        if (previous.run_id, previous.run_attempt) == (candidate.run_id, candidate.run_attempt):
-            return result("version_conflict", 3)
-        if candidate.generated_at <= previous.generated_at:
-            return result("stale_rejected" if candidate.generated_at < previous.generated_at else "version_conflict", 3)
-    try:
-        uncertain_confirmed = _ensure_history(candidate, storage, sleep, budget)
-        current = storage.read_image(candidate.latest_key)
-        if not _same(current, previous):
-            return result("concurrent_change", 5, "not_attempted")
-        if _same(previous, candidate):
-            return result("already_current")
-        budget.require_overwrite_budget()
-    except (StorageError, InvalidArtifact) as error:
-        if isinstance(error, StorageError) and error.code == "history_conflict":
-            return result("version_conflict", 3, error="history_conflict")
-        return result("failed_before_overwrite", 4 if previous else 5,
-                      "previous_retained" if previous else "no_previous", "history_or_precheck_failed")
+    def result(status, code=0, error=""):
+        return PublishResult(status, key, candidate.sha256, candidate.generated_at.isoformat(), code, error)
 
     for attempt in range(3):
-        if attempt:
-            try:
-                current = storage.read_image(candidate.latest_key)
-                if _same(current, candidate):
-                    uncertain_confirmed = True
-                    return result("published")
-                if not _same(current, previous):
-                    return result("concurrent_change", 5, "not_attempted")
-            except (StorageError, InvalidArtifact):
-                break
         write_error = None
         try:
-            budget.require_overwrite_budget()
-            storage.put_image(candidate.latest_key, candidate, insert_only=False)
+            budget.timeout(1)
+            storage.put_image(key, candidate, insert_only=True)
         except StorageError as error:
             write_error = error
-        try:
-            current = storage.read_image(candidate.latest_key)
-            if _same(current, candidate):
-                uncertain_confirmed |= bool(write_error and write_error.uncertain)
-                return result("published")
-            if current is not None and not _same(current, previous):
-                return result("concurrent_change", 5, "not_attempted")
-            if write_error and write_error.retryable and attempt < 2:
-                _backoff(attempt, sleep, budget)
-                continue
-            if previous and _same(current, previous):
-                return result("failed_previous_retained", 4, "previous_retained", "latest_unverified")
-        except (StorageError, InvalidArtifact):
-            pass
-        break
-    return _restore(candidate, previous, storage, budget, result)
-
-
-def _restore(candidate, previous, storage, budget, result):
-    budget.recovering = True
-    if previous is None:
-        return result("failed_no_previous", 5, "no_previous", "latest_unverified")
-    try:
-        # Probe cannot consume the budget needed to restore and verify old bytes.
-        with budget.limit(5):
-            current = storage.read_image(candidate.latest_key)
-        if _same(current, previous):
-            return result("failed_previous_retained", 4, "previous_retained", "latest_unverified")
-        if current is not None and not _same(current, candidate):
-            return result("concurrent_change", 5, "not_attempted")
-    except (StorageError, InvalidArtifact):
-        pass  # A verified single publisher may restore while reads are failing.
-    try:
-        try:
-            # Keep a full readback window even when the recovery PUT stalls.
-            with budget.limit(budget.remaining() - 30):
-                budget.timeout(60)
-                storage.put_image(candidate.latest_key, previous, insert_only=False)
-        except StorageError:
-            pass  # An interrupted upload may nevertheless have committed.
-        current = storage.read_image(candidate.latest_key)
-        if _same(current, previous):
-            return result("failed_restored", 4, "restored", "latest_unverified")
-    except (StorageError, InvalidArtifact):
-        pass
-    return result("failed_recovery_unverified", 5, "unverified", "recovery_unverified")
+        if write_error is None or write_error.uncertain or write_error.code == "object_exists":
+            try:
+                stored = storage.read_image(key)
+                if stored is not None:
+                    if stored.sha256 != candidate.sha256:
+                        return result("version_conflict", 3, "timestamp_collision")
+                    return result("already_current" if write_error and write_error.code == "object_exists"
+                                  else "published")
+            except (StorageError, InvalidArtifact):
+                return result("publication_unconfirmed", 5, "readback_failed")
+            return result("publication_unconfirmed", 5, "readback_missing")
+        if not write_error.retryable or attempt == 2:
+            return result("upload_failed", 5, write_error.code)
+        delay = (2, 5)[attempt]
+        if budget.remaining() <= delay:
+            return result("upload_failed", 5, "deadline_exceeded")
+        sleep(delay)
+    return result("upload_failed", 5)

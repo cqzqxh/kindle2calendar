@@ -13,30 +13,47 @@ load_config() {
     [ -r "$BASE/config.sh" ] || return 1
     . "$BASE/config.sh" 2>/dev/null || return 1
     INTERVAL=${INTERVAL:-1800}
-    CALENDAR_URL=${CALENDAR_URL:-}
+    POWER_MODE=${POWER_MODE:-rtc}
+    RTC_INTERVAL=${RTC_INTERVAL:-0}
+    SCREENSAVER_IMAGE=${SCREENSAVER_IMAGE:-}
+    is_uint "$RTC_INTERVAL" || return 1
+    [ "$RTC_INTERVAL" -eq 0 ] || { [ "$RTC_INTERVAL" -ge 60 ] && [ "$RTC_INTERVAL" -le 86400 ]; } || return 1
+    case "$SCREENSAVER_IMAGE" in ''|/*) ;; *) return 1 ;; esac
+    TIMEZONE=${TIMEZONE:-Asia/Shanghai}
+    case "$POWER_MODE" in rtc|awake) ;; *) return 1 ;; esac
+    # Older Kindle firmware may not ship the IANA database. Shanghai has no DST.
+    if [ "$TIMEZONE" = Asia/Shanghai ] && [ ! -f /usr/share/zoneinfo/Asia/Shanghai ]; then
+        TZ=CST-8
+    else
+        [ -f "/usr/share/zoneinfo/$TIMEZONE" ] || return 1
+        TZ=$TIMEZONE
+    fi
+    export TZ
+    HIDE_STATUS_BAR=${HIDE_STATUS_BAR:-0}
+    case "$HIDE_STATUS_BAR" in 0|1) ;; *) return 1 ;; esac
+    ALLOW_HTTP_DOWNLOAD=${ALLOW_HTTP_DOWNLOAD:-0}
+    case "$ALLOW_HTTP_DOWNLOAD" in 0|1) ;; *) return 1 ;; esac
+    DISCOVERY_CONFIG=${DISCOVERY_CONFIG:-/var/local/family-calendar/discovery.json}
     CA_CERT=${CA_CERT:-}
     FBINK=${FBINK:-}
-    case "$CALENDAR_URL" in https://*) ;; *) return 1 ;; esac
-    case "$CALENDAR_URL" in *'"'*|*"'"*|*'\'*|*'#'*|*[[:space:][:cntrl:]]*) return 1 ;; esac
-    url_rest=${CALENDAR_URL#https://}
-    url_host=${url_rest%%/*}
-    case "$url_host" in ''|*'@'*|*'?'*|*':'*) return 1 ;; esac
-    case "$url_rest" in */*\?*) ;; *) return 1 ;; esac
-    url_query=${CALENDAR_URL#*\?}
-    url_expiry=''
-    while :; do
-        url_part=${url_query%%&*}
-        case "$url_part" in
-            e=*) [ -z "$url_expiry" ] || return 1
-                 url_expiry=${url_part#e=}
-                 is_uint "$url_expiry" || return 1 ;;
-        esac
-        case "$url_query" in *'&'*) url_query=${url_query#*&} ;; *) break ;; esac
-    done
-    is_uint "$url_expiry" || return 1
-    URL_EXPIRES_AT=${URL_EXPIRES_AT:-$url_expiry}
-    is_uint "$URL_EXPIRES_AT" && [ "$URL_EXPIRES_AT" = "$url_expiry" ] || return 1
+    [ -r "$DISCOVERY_CONFIG" ] || return 1
     is_uint "$INTERVAL" && [ "$INTERVAL" -ge 60 ] || return 1
+}
+
+# Seconds until the next local wall-clock slot. Midnight–06:00 uses 2h slots;
+# the rest of the day uses 30m slots. Always return a future slot.
+next_sync_delay() {
+    if [ "${RTC_INTERVAL:-0}" -gt 0 ]; then
+        printf '%s\n' "$RTC_INTERVAL"
+        return 0
+    fi
+    slot_clock=$(date '+%H %M %S') || return 1
+    set -- $slot_clock
+    [ "$#" -eq 3 ] || return 1
+    slot_seconds=$(((1$1 - 100) * 3600 + (1$2 - 100) * 60 + 1$3 - 100))
+    slot_period=1800
+    [ "$slot_seconds" -ge 21600 ] || slot_period=7200
+    printf '%s\n' "$((slot_period - slot_seconds % slot_period))"
 }
 
 read_field() {
@@ -113,13 +130,4 @@ report_power_recovery() {
 utc_time() {
     date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null ||
         date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '%s\n' "$1"
-}
-
-expiry_notice() {
-    expiry_now=$(date +%s)
-    if [ "$URL_EXPIRES_AT" -le "$expiry_now" ]; then
-        printf '%s\n' url_expired
-    elif [ "$((URL_EXPIRES_AT - expiry_now))" -lt 604800 ]; then
-        printf '%s\n' url_expires_within_7_days
-    fi
 }

@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 import time
 from unittest.mock import patch
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 
 import qiniu
 from qiniu.utils import etag_stream
@@ -37,6 +37,12 @@ class FakeHTTP:
 
 
 class KodoTests(unittest.TestCase):
+    def test_readback_and_explicit_download_expiry(self):
+        store = KodoStorage(KodoConfig.from_env(ENV))
+        with patch("qiniu.auth.time.time", return_value=1000):
+            self.assertEqual(parse_qs(urlsplit(store.download_url(artifact().object_key())).query)["e"], ["1060"])
+            self.assertEqual(parse_qs(urlsplit(store.download_url(artifact().object_key(), expires=300)).query)["e"], ["1300"])
+
     def storage(self, responses):
         http = FakeHTTP(responses)
         return KodoStorage(KodoConfig.from_env(ENV), transport=http, sleep=lambda _: None), http
@@ -52,24 +58,24 @@ class KodoTests(unittest.TestCase):
     def test_only_404_is_absent(self):
         image = artifact()
         store, _ = self.storage([(404, {}, b"")])
-        self.assertIsNone(store.read_image(image.latest_key))
+        self.assertIsNone(store.read_image(image.object_key()))
         for status in (200, 204, 301, 401, 403):
             store, http = self.storage([(status, {}, b"bad")])
             with self.subTest(status=status), self.assertRaises((StorageError, InvalidArtifact)):
-                store.read_image(image.latest_key)
+                store.read_image(image.object_key())
             self.assertEqual(len(http.calls), 1)
 
     def test_read_retries_transient_failure_but_never_changes_key(self):
         image = artifact()
         store, http = self.storage([(503, {}, b""), (429, {}, b""), (200, {}, image.png_bytes)])
-        loaded = store.read_image(image.latest_key)
+        loaded = store.read_image(image.object_key())
         self.assertEqual(loaded.sha256, image.sha256)
         self.assertEqual(len(http.calls), 3)
-        self.assertTrue(all(call[1].startswith("https://images.example/" + image.latest_key + "?e=") for call in http.calls))
+        self.assertTrue(all(call[1].startswith("https://images.example/" + image.object_key() + "?e=") for call in http.calls))
 
     def test_upload_token_exact_key_and_insert_semantics(self):
         image = artifact()
-        for insert_only, key in ((True, image.history_key), (False, image.latest_key)):
+        for insert_only, key in ((True, image.object_key()), (False, image.object_key())):
             response = json.dumps({"key": key, "hash": etag_stream(io.BytesIO(image.png_bytes))}).encode()
             store, http = self.storage([(200, {}, response)])
             store.put_image(key, image, insert_only)
@@ -88,59 +94,21 @@ class KodoTests(unittest.TestCase):
                          (503, {}, b"private-url")):
             store, http = self.storage([response])
             with self.assertRaises(StorageError) as caught:
-                store.put_image(image.latest_key, image, False)
+                store.put_image(image.object_key(), image, False)
             self.assertNotIn("private-url", str(caught.exception))
             self.assertEqual(len(http.calls), 1)  # publisher must reconcile before retrying writes
 
-    def test_deadline_stops_requests_and_reserves_recovery(self):
+    def test_deadline_stops_requests(self):
         clock = [0.0]
         deadline = Deadline(100, clock=lambda: clock[0])
         store, http = self.storage([])
         store.deadline = deadline
-        clock[0] = 11
+        clock[0] = 101
         with self.assertRaises(StorageError):
-            store.read_image(artifact().latest_key)
+            store.read_image(artifact().object_key())
         self.assertFalse(http.calls)
-        deadline.recovering = True
+        clock[0] = 70
         self.assertEqual(deadline.timeout(30), 30)
-
-    def test_recovery_probe_preserves_time_for_restore_and_verification(self):
-        previous, candidate = artifact(-1), artifact(0, "run-2")
-        clock, recovery_calls = [0.0], []
-        deadline = Deadline(clock=lambda: clock[0])
-        objects = {previous.latest_key: previous.png_bytes, candidate.history_key: candidate.png_bytes}
-        class Transport:
-            latest_reads = 0
-            restored = False
-            def request(self, method, url, *, timeout, body=b"", fields=None, **kwargs):
-                if deadline.recovering:
-                    recovery_calls.append((method, timeout))
-                if method == "GET":
-                    key = urlsplit(url).path.lstrip("/")
-                    if key == candidate.latest_key:
-                        self.latest_reads += 1
-                        if self.latest_reads == 2:
-                            clock[0] = 390  # Last minute of the normal budget.
-                        if deadline.recovering:
-                            clock[0] += timeout
-                            if not self.restored:
-                                raise StorageError("request_timeout", retryable=True)
-                    return 200, {}, objects[key]
-                key = fields["key"]
-                objects[key] = body
-                clock[0] += timeout
-                if body == candidate.png_bytes:
-                    raise StorageError("request_timeout", retryable=True, uncertain=True)
-                self.restored = True
-                response = {"key": key, "hash": etag_stream(io.BytesIO(body))}
-                return 200, {}, json.dumps(response).encode()
-        store = KodoStorage(KodoConfig.from_env(ENV), transport=Transport(), deadline=deadline,
-                            sleep=lambda delay: clock.__setitem__(0, clock[0] + delay))
-        result = publish_artifact(candidate, store, now=NOW, budget=deadline)
-        self.assertEqual(result.status, "failed_restored")
-        self.assertEqual(objects[candidate.latest_key], previous.png_bytes)
-        self.assertEqual(recovery_calls, [("GET", 5), ("POST", 55), ("GET", 30)])
-        self.assertLessEqual(clock[0], deadline.end)
 
     def test_transport_timeout_and_errors_are_sanitized(self):
         for failure in (subprocess.TimeoutExpired("secret-url", 1), OSError("secret-url")):
@@ -160,7 +128,7 @@ class KodoTests(unittest.TestCase):
     def test_key_outside_screen_is_rejected_without_request(self):
         store, http = self.storage([])
         with self.assertRaises(ValueError):
-            store.read_image("family-calendar/other/latest.png")
+            store.read_image("family-calendar/other/20261025/20261025120000.png")
         self.assertFalse(http.calls)
 
 
@@ -219,6 +187,6 @@ class HTTPWorkerTests(unittest.TestCase):
     def test_interrupted_response_retries_then_downloads_complete_image(self):
         store = KodoStorage(KodoConfig.from_env(ENV), sleep=lambda _: None)
         with patch.object(store, "download_url", return_value=self.origin + "/cut-once"):
-            loaded = store.read_image(self.download_image.latest_key)
+            loaded = store.read_image(self.download_image.object_key())
         self.assertEqual(loaded.sha256, self.download_image.sha256)
         self.assertEqual(self.cut_requests, 2)
