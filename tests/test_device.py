@@ -12,7 +12,7 @@ import unittest
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-SIGNED_URL = 'https://calendar.example/family-calendar/screen/latest.png?e=1900000000&token=private-fixture'
+SIGNED_URL = 'https://calendar.example/family-calendar/screen/20261025/20261025120000.png?e=1900000000&token=private-fixture'
 
 
 def png(shade=255, size=(1072, 1448), mode='L'):
@@ -31,8 +31,20 @@ with (root/'calls').open('a') as stream:
     stream.write(json.dumps([name] + args) + '\n')
 mode = os.environ.get('MOCK_MODE', 'valid')
 if name == 'lipc-get-prop':
-    print('7')
+    if args[-1] == 'enable':
+        print('0')
+    elif args[-1] == 'cmState':
+        print('OFF' if os.environ.get('MOCK_WIFI_OFFLINE') else 'CONNECTED')
+    elif args[-1] == 'state':
+        print('active' if (root/'power.active').exists() else 'readyToSuspend')
+    else:
+        print('7')
 elif name == 'lipc-set-prop':
+    if 'powerButton' in args:
+        if (root/'power.active').exists(): (root/'power.active').unlink()
+        else: (root/'power.active').write_text('1')
+    if 'rtcWakeup' in args and os.environ.get('MOCK_RTC_FAIL'):
+        sys.exit(1)
     if args[-1] == '7' and os.environ.get('MOCK_POWER_RESTORE_FAIL'):
         sys.exit(1)
 elif name == 'df':
@@ -88,12 +100,20 @@ elif name == 'mv':
         sys.exit(1)
     os.replace(source, dest)
 elif name == 'sleep':
-    if args[0] == '5':
+    if args[0] == '5' and os.environ.get('MOCK_RTC_WAIT'):
+        (root/'sleep.pid').write_text(str(os.getpid()))
+        def stop_sleep(*unused):
+            (root/'sleep.stopped').write_text('yes')
+            sys.exit(143)
+        signal.signal(signal.SIGTERM, stop_sleep)
+        while True:
+            time.sleep(0.02)
+    if args[0] in ('2', '5'):
         pass
     elif args[0] in ('60', '1800') and not os.environ.get('MOCK_KEEP_ALIVE'):
         os.kill(os.getppid(), signal.SIGTERM)
     else:
-        time.sleep(0.05 if args[0] == '1' else 60)
+        time.sleep(0.2 if args[0] == '1' else 60)
 '''
 
 
@@ -104,7 +124,7 @@ class DeviceTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.bin = self.root / 'bin'
         self.bin.mkdir()
-        for name in ('run.sh', 'common.sh', 'control.sh'):
+        for name in ('run.sh', 'common.sh', 'power.sh', 'control.sh', 'statusbar.sh'):
             source = ROOT / 'kindle' / name
             if source.exists():
                 (self.root / name).write_bytes(source.read_bytes())
@@ -119,12 +139,17 @@ class DeviceTests(unittest.TestCase):
                     'MOCK_ROOT': str(self.root), 'MOCK_MODE': 'valid'}
         self.config()
 
-    def config(self, url=SIGNED_URL, expiry='1900000000', extra=''):
+    def config(self, url=SIGNED_URL, expiry=None, extra=''):
+        (self.root / 'discovery.json').write_text('{}')
+        helper = self.root / 'discover.sh'
+        helper.write_text('discover_calendar() {\n'
+                          '  [ "${MOCK_DISCOVERY_FAIL:-0}" != 1 ] || return 1\n'
+                          + "  printf '%s\\n' " + shlex.quote('url = "' + SIGNED_URL + '"') + ' > "$3"\n}\n')
         (self.root / 'config.sh').write_text(
-            f'CALENDAR_URL={shlex.quote(url)}\n'
+            f'DISCOVERY_CONFIG={shlex.quote(str(self.root / "discovery.json"))}\n'
             f"CA_CERT={shlex.quote(str(self.root / 'ca-bundle.crt'))}\n"
-            f"FBINK={shlex.quote(str(self.bin / 'fbink'))}\nINTERVAL=60\n"
-            + (f'URL_EXPIRES_AT={shlex.quote(expiry)}\n' if expiry is not None else '') + extra)
+            f"FBINK={shlex.quote(str(self.bin / 'fbink'))}\nINTERVAL=60\nPOWER_MODE=awake\n"
+            + ('DISCOVERY_CONFIG=/nonexistent\n' if url == 'http://invalid' else '') + extra)
 
     def run_device(self, mode='valid', once=True, **env):
         result = subprocess.run(['sh', str(self.root / 'run.sh')] + (['--once'] if once else []),
@@ -245,29 +270,25 @@ class DeviceTests(unittest.TestCase):
         self.assertFalse(self.calls('curl'))
         self.assertEqual(self.state()['status'], 'disk_full')
 
-    def test_expired_signature_skips_network_but_keeps_cached_image(self):
-        self.config(SIGNED_URL.replace('1900000000', '1000000000'), '1000000000')
-        self.assertEqual(self.run_device().returncode, 1)
+    def test_discovery_failure_skips_download_and_retains_previous(self):
+        self.assertEqual(self.run_device(MOCK_DISCOVERY_FAIL='1').returncode, 1)
         self.assertFalse(self.calls('curl'))
         self.assert_previous()
-        self.assertEqual(self.state()['status'], 'url_expired')
+        self.assertEqual(self.state()['status'], 'discovery_failed')
 
-    def test_expiry_can_be_derived_but_explicit_mismatch_is_configuration_error(self):
-        self.config(expiry=None)
+    def test_http_image_download_requires_explicit_demo_flag(self):
         self.assertEqual(self.run_device().returncode, 0)
-        self.config(expiry='1900000001')
-        self.assertEqual(self.run_device().returncode, 2)
+        request = self.calls('curl')[-1]
+        self.assertEqual(request[request.index('--proto') + 1], '=https')
+        self.config(extra='ALLOW_HTTP_DOWNLOAD=1\n')
+        self.assertEqual(self.run_device().returncode, 0)
+        request = self.calls('curl')[-1]
+        self.assertEqual(request[request.index('--proto') + 1], '=http,https')
 
-    def test_url_cannot_inject_curl_configuration(self):
-        for url in ('http://example/a', 'https://example/secret\noutput=other',
-                    'https://example/a"b', 'https://example/a\\b', 'https://example/a b',
-                    "https://example/a'b?e=1900000000",
-                    'https://example/a?e=1900000000&e=1900000000',
-                    'https://user@example/a?e=1900000000', 'https://example/a?e=1900000000#x'):
-            with self.subTest(url=url):
-                self.config(url)
-                self.assertEqual(self.run_device().returncode, 2)
-                self.assertFalse((self.root / '.running').exists())
+    def test_missing_discovery_config_fails_before_lock(self):
+        (self.root / 'discovery.json').unlink()
+        self.assertEqual(self.run_device().returncode, 2)
+        self.assertFalse((self.root / '.running').exists())
 
     def test_stale_lock_is_never_removed_or_modified(self):
         lock = self.root / '.running'
@@ -290,8 +311,8 @@ class DeviceTests(unittest.TestCase):
         self.assertLessEqual((self.root / 'run.log.1').stat().st_size, 131072)
         self.assertNotIn('private-fixture', (self.root / 'run.log').read_text())
 
-    def wait_file(self, name):
-        deadline = time.monotonic() + 5
+    def wait_file(self, name, timeout=5):
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if (self.root / name).exists():
                 return
@@ -330,6 +351,33 @@ class DeviceTests(unittest.TestCase):
             os.kill(child_pid, 0)
         self.assertIn(['lipc-set-prop', 'com.lab126.powerd', 'preventScreenSaver', '7'], self.calls())
 
+    def test_stop_during_real_discovery_reaps_list_request_and_private_files(self):
+        (self.root / 'discover.sh').write_bytes((ROOT / 'kindle/discover.sh').read_bytes())
+        (self.root / 'discovery.json').write_text(json.dumps({
+            'access_key': 'fixture-ak', 'secret_key': 'fixture-secret6',
+            'bucket': 'calendar-test', 'screen_id': 'screen', 'domain': 'https://images.example'}))
+        (self.root / 'discovery.json').chmod(0o600)
+        process = subprocess.Popen(['sh', str(self.root / 'run.sh')],
+                                   env={**self.env, 'MOCK_MODE': 'block'},
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+        self.addCleanup(cleanup)
+        self.wait_file('curl.pid')
+        request = self.calls('curl')[0]
+        request_config = Path(request[request.index('--config') + 1])
+        private_dir = request_config.parent.parent
+        self.assertTrue(request_config.exists())
+        self.assertEqual(request_config.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn('fixture-secret6', json.dumps(self.calls()))
+        self.assertEqual(self.control('stop').returncode, 0)
+        self.assertEqual(process.wait(timeout=5), 0)
+        self.assertTrue((self.root / 'curl.stopped').exists())
+        self.assertFalse(private_dir.exists())
+        self.assertFalse((self.root / '.running').exists())
+
     def test_control_refuses_reused_pid_and_preserves_stale_lock(self):
         lock = self.root / '.running'
         lock.mkdir()
@@ -357,7 +405,7 @@ class DeviceTests(unittest.TestCase):
         result = self.control('status')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('尚无成功同步'.encode(), result.stdout)
-        self.assertIn(b'1900000000', result.stdout)
+        self.assertIn(b'discovery=timestamped_list', result.stdout)
 
     def test_interrupted_once_is_not_reported_as_success(self):
         process = subprocess.Popen(['sh', str(self.root / 'run.sh'), '--once'],
@@ -478,6 +526,149 @@ class DeviceTests(unittest.TestCase):
         self.assertNotEqual(status.returncode, 0)
         self.assertIn(b'power_restore_failed previous=7', status.stdout)
         self.assertEqual((self.root / 'calendar.png').read_bytes(), NEXT_PNG)
+
+
+    def test_rtc_failure_is_reported_and_wifi_and_power_are_restored(self):
+        self.config(extra='POWER_MODE=rtc\n')
+        result = self.run_device(once=False, MOCK_RTC_FAIL='1')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.state()['status'], 'wake_schedule_failed')
+        self.assertEqual(self.state()['next_sync'], '0')
+        self.assertIn(['lipc-set-prop', 'com.lab126.wifid', 'enable', '0'], self.calls())
+        self.assertIn(['lipc-set-prop', 'com.lab126.powerd', 'preventScreenSaver', '0'], self.calls())
+        self.assertIn(['lipc-set-prop', 'com.lab126.powerd', 'preventScreenSaver', '7'], self.calls())
+        self.assertEqual(len(self.calls('curl')), 1)
+        self.assertFalse((self.root / '.running').exists())
+
+    def test_wifi_wait_is_bounded_and_does_not_download_on_failure(self):
+        self.config(extra='POWER_MODE=rtc\n')
+        (self.bin / 'sleep').write_text('#!/bin/sh\nexit 0\n')
+        result = self.run_device(once=False, MOCK_WIFI_OFFLINE='1', MOCK_RTC_FAIL='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(self.calls('curl'))
+        self.assertEqual(sum(call[-1] == 'cmState' for call in self.calls('lipc-get-prop')), 15)
+        self.assertIn('network_wake_failed', (self.root / 'run.log').read_text())
+        self.assertIn(['lipc-set-prop', 'com.lab126.wifid', 'enable', '0'], self.calls())
+
+    def test_unknown_power_mode_and_timezone_are_configuration_errors(self):
+        for extra in ('POWER_MODE=unknown\n', 'TIMEZONE=Invalid/Zone\n',
+                      'RTC_INTERVAL=59\n', 'RTC_INTERVAL=86401\n', 'RTC_INTERVAL=invalid\n',
+                      'SCREENSAVER_IMAGE=relative.png\n'):
+            with self.subTest(extra=extra):
+                self.config(extra=extra)
+                self.assertEqual(self.run_device().returncode, 2)
+                self.assertFalse(self.calls())
+
+    def test_screensaver_entry_updates_only_after_successful_display(self):
+        target = self.root / 'screensaver.png'
+        self.config(extra='SCREENSAVER_IMAGE=' + shlex.quote(str(target)) + '\n')
+        target.write_bytes(PREVIOUS_PNG)
+        self.assertEqual(self.run_device('draw-fail').returncode, 1)
+        self.assertEqual(target.read_bytes(), PREVIOUS_PNG)
+        self.assertEqual(self.run_device().returncode, 0)
+        self.assertEqual(target.read_bytes(), NEXT_PNG)
+        self.assertFalse(Path(str(target) + '.tmp').exists())
+
+    def test_stop_while_waiting_for_rtc_reaps_waiter_and_restores_power(self):
+        self.config(extra='POWER_MODE=rtc\n')
+        process = subprocess.Popen(['sh', str(self.root / 'run.sh')],
+                                   env={**self.env, 'MOCK_RTC_WAIT': '1'},
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+        self.addCleanup(cleanup)
+        # RTC startup includes wake, cached drawing, sync and state writes.
+        self.wait_file('sleep.pid', timeout=15)
+        status = self.control('status')
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn(b'next_sync=', status.stdout)
+        self.assertEqual(self.control('stop').returncode, 0)
+        self.assertEqual(process.wait(timeout=5), 0)
+        self.assertTrue((self.root / 'sleep.stopped').exists())
+        self.assertFalse((self.root / '.running').exists())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int((self.root / 'sleep.pid').read_text()), 0)
+        self.assertIn(['lipc-set-prop', 'com.lab126.powerd', 'preventScreenSaver', '7'], self.calls())
+
+
+class WakeScheduleTests(unittest.TestCase):
+    def shell(self, script):
+        return subprocess.run(['sh', '-c', script], capture_output=True, text=True, timeout=5)
+
+    def test_wall_clock_boundaries(self):
+        for clock, expected in [('00 00 00', 7200), ('01 59 59', 1), ('02 00 00', 7200),
+                                ('04 00 00', 7200), ('05 59 59', 1), ('06 00 00', 1800),
+                                ('06 29 59', 1), ('12 30 00', 1800), ('23 59 59', 1)]:
+            with self.subTest(clock=clock):
+                result = self.shell(f'. {shlex.quote(str(ROOT / "kindle/common.sh"))}\n'
+                                    f'date() {{ echo "{clock}"; }}\nnext_sync_delay')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(int(result.stdout), expected)
+
+    def test_explicit_rtc_interval_overrides_day_night_slots(self):
+        result = self.shell(f'. {shlex.quote(str(ROOT / "kindle/common.sh"))}\n'
+                            'RTC_INTERVAL=300\ndate() { echo "00 00 00"; }\nnext_sync_delay')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '300')
+
+    def test_wake_button_is_not_toggled_when_already_active(self):
+        for initial, expected in [('active', 0), ('screenSaver', 1)]:
+            script = f'''
+alias lipc-get-prop=mock_get
+alias lipc-set-prop=mock_set
+. {shlex.quote(str(ROOT / 'kindle/power.sh'))}
+state={initial}
+count=0
+mock_get() {{ echo "$state"; }}
+mock_set() {{ count=$((count + 1)); state=active; }}
+run_child() {{ :; }}
+wake_device || exit 1
+wake_device || exit 1
+echo "$count"
+'''
+            result = self.shell(script)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(expected))
+
+    def test_alarm_only_armed_in_ready_window_and_early_wakes_do_not_sync(self):
+        script = f'''
+exec 3>&1
+alias lipc-get-prop=mock_get
+alias lipc-set-prop=mock_set
+. {shlex.quote(str(ROOT / 'kindle/power.sh'))}
+clock=1000
+step=0
+NEXT_SYNC=0
+DISPLAY_KNOWN=1
+date() {{ echo "$clock"; }}
+next_sync_delay() {{ echo 30; }}
+write_state() {{ :; }}
+log_event() {{ :; }}
+restore_statusbar() {{ :; }}
+pause_statusbar() {{ :; }}
+wake_device() {{ mock_set com.lab126.powerd powerButton 1; }}
+mock_get() {{
+    case "$step" in 0) echo active ;; 1|3) echo readyToSuspend ;; *) echo screenSaver ;; esac
+}}
+mock_set() {{ echo "$*" >&3; }}
+run_child() {{
+    [ "$2" = 5 ] || return 0
+    step=$((step + 1))
+    clock=$((clock + 7))
+}}
+wait_for_slot || exit 1
+echo "next=$NEXT_SYNC display=$DISPLAY_KNOWN"
+'''
+        result = self.shell(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual([line for line in lines if 'rtcWakeup' in line],
+                         ['-i com.lab126.powerd rtcWakeup 23', '-i com.lab126.powerd rtcWakeup 9'])
+        self.assertNotIn('com.lab126.powerd wakeUp 1', lines)
+        self.assertEqual(lines.count('com.lab126.powerd powerButton 1'), 2)
+        self.assertIn('next=0 display=0', lines)
 
 
 if __name__ == '__main__':

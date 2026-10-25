@@ -6,20 +6,28 @@ BASE=$(pwd -P)
 # Canonical argv allows control.sh to verify this process unambiguously.
 [ "$0" = "$BASE/run.sh" ] || exec sh "$BASE/run.sh" "$@"
 . "$BASE/common.sh" || exit 2
+. "$BASE/power.sh" || exit 2
+. "$BASE/discover.sh" || exit 2
+. "$BASE/statusbar.sh" || exit 2
 MODE=loop
 case "$#:$*" in 0:) ;; 1:--once) MODE=once ;; *) echo 'usage: run.sh [--once]' >&2; exit 2 ;; esac
 load_config || { echo 'configuration_invalid' >&2; exit 2; }
 [ -r "$CA_CERT" ] && [ -x "$FBINK" ] || { echo 'dependency_invalid' >&2; exit 2; }
-for required in curl lipc-get-prop lipc-set-prop od dd tr cmp wc df awk date ps cat mv rm mkdir rmdir sleep; do
+for required in jq openssl stat sort tail grep mktemp cp curl lipc-get-prop lipc-set-prop od dd tr cmp wc df awk date ps cat mv rm mkdir rmdir sleep; do
     command -v "$required" >/dev/null 2>&1 || { echo "dependency_missing: $required" >&2; exit 2; }
 done
 LOCK="$BASE/.running"
 mkdir "$LOCK" 2>/dev/null || { echo 'lock_occupied: inspect the existing process before recovery' >&2; exit 3; }
 CHILD=''
+PRIVATE_DIR=''
+STATUSBAR_PID=''
+STATUSBAR_STARTED=''
 PREVIOUS=''
 OWN_STARTED=''
 DISPLAY_KNOWN=0
 RECOVERY=none
+WIFI_PREVIOUS=''
+NEXT_SYNC=0
 SIGNAL_POLICY=foreground
 
 cleanup() {
@@ -35,6 +43,8 @@ cleanup() {
     cleanup_pid=$(cat "$LOCK/pid" 2>/dev/null)
     cleanup_started=$(cat "$LOCK/started" 2>/dev/null)
     if [ "$cleanup_pid" = "$$" ] && [ "$cleanup_started" = "$OWN_STARTED" ]; then
+        restore_statusbar || { echo 'statusbar_restore_failed' >&2; cleanup_exit=1; }
+        restore_wifi || { echo 'wifi_restore_failed' >&2; cleanup_exit=1; }
         power_restored=1
         if [ -n "$PREVIOUS" ]; then
             if ! lipc-set-prop com.lab126.powerd preventScreenSaver "$PREVIOUS" >/dev/null 2>&1; then
@@ -48,6 +58,7 @@ cleanup() {
                 write_state
             fi
         fi
+        [ -z "$PRIVATE_DIR" ] || rm -rf "$PRIVATE_DIR" 2>/dev/null
         rm -f "$LOCK/ready" "$LOCK/curl.conf" "$LOCK/next.png" "$LOCK/http.status" "$BASE/.state.$$" 2>/dev/null
         if [ "$power_restored" -eq 1 ]; then
             rm -f "$LOCK/pid" "$LOCK/started" "$LOCK/script" "$LOCK/signal_policy" \
@@ -99,8 +110,8 @@ log_event() {
 }
 
 write_state() {
-    if ! { printf 'status=%s\nlast_success=%s\nfailures=%s\ndisplay_known=%s\nrecovery=%s\n' \
-        "$STATUS" "$LAST_SUCCESS" "$FAILURES" "$DISPLAY_KNOWN" "$RECOVERY" > "$BASE/.state.$$" &&
+    if ! { printf 'status=%s\nlast_success=%s\nfailures=%s\ndisplay_known=%s\nrecovery=%s\nnext_sync=%s\n' \
+        "$STATUS" "$LAST_SUCCESS" "$FAILURES" "$DISPLAY_KNOWN" "$RECOVERY" "$NEXT_SYNC" > "$BASE/.state.$$" &&
         mv -f "$BASE/.state.$$" "$BASE/state"; } 2>/dev/null; then
         echo 'state_write_failed' >&2
         rm -f "$BASE/.state.$$" 2>/dev/null || :
@@ -132,17 +143,35 @@ restore_previous() {
     fi
 }
 
+update_screensaver() {
+    [ -n "$SCREENSAVER_IMAGE" ] || return 0
+    # Atomic replacement keeps linkss from seeing a partially copied PNG.
+    if ! cp "$BASE/calendar.png" "$SCREENSAVER_IMAGE.tmp" 2>/dev/null; then
+        rm -f "$SCREENSAVER_IMAGE.tmp" 2>/dev/null
+        return 1
+    fi
+    if ! mv -f "$SCREENSAVER_IMAGE.tmp" "$SCREENSAVER_IMAGE" 2>/dev/null; then
+        rm -f "$SCREENSAVER_IMAGE.tmp" 2>/dev/null
+        return 1
+    fi
+}
+
 sync_once() {
     RECOVERY=none
-    [ "$URL_EXPIRES_AT" -gt "$(date +%s)" ] || { STATUS=url_expired; return 1; }
+    if ! discover_calendar "$DISCOVERY_CONFIG" "$CA_CERT" "$PRIVATE_DIR/curl.conf" >/dev/null 2>&1; then
+        STATUS=discovery_failed
+        return 1
+    fi
     free_kib=$(df -Pk "$BASE" 2>/dev/null | awk 'NR == 2 {print $4}')
     is_uint "$free_kib" && [ "$free_kib" -ge 6144 ] || { STATUS=disk_full; return 1; }
+    download_proto='=https'
+    [ "$ALLOW_HTTP_DOWNLOAD" != 1 ] || download_proto='=http,https'
     attempt=1
     while :; do
         rm -f "$LOCK/next.png"
         curl_result=0
         # -q disables ~/.curlrc; the signature only appears in the private config.
-        run_child curl -q --config "$LOCK/curl.conf" --silent --proto '=https' \
+        run_child curl -q --config "$PRIVATE_DIR/curl.conf" --silent --proto "$download_proto" \
             --cacert "$CA_CERT" --connect-timeout 10 --max-time 40 --max-filesize 2097152 \
             --write-out '%{http_code}' --output "$LOCK/next.png" > "$LOCK/http.status" 2>/dev/null || curl_result=$?
         http_status=$(cat "$LOCK/http.status" 2>/dev/null)
@@ -166,6 +195,7 @@ sync_once() {
     done
     validate_png "$LOCK/next.png" || { STATUS=$PNG_ERROR; return 1; }
     if [ "$DISPLAY_KNOWN" -eq 1 ] && cmp -s "$LOCK/next.png" "$BASE/calendar.png"; then
+        update_screensaver || { STATUS=screensaver_save_failed; return 1; }
         STATUS=unchanged
         return 0
     fi
@@ -180,6 +210,7 @@ sync_once() {
         return 1
     fi
     DISPLAY_KNOWN=1
+    update_screensaver || { STATUS=screensaver_save_failed; return 1; }
     STATUS=updated
     return 0
 }
@@ -189,10 +220,13 @@ PREVIOUS=$(lipc-get-prop com.lab126.powerd preventScreenSaver 2>/dev/null) || { 
 is_uint "$PREVIOUS" || { PREVIOUS=''; echo 'power_value_invalid' >&2; exit 2; }
 printf '%s\n' "$PREVIOUS" > "$LOCK/powerd.previous" || exit 2
 lipc-set-prop com.lab126.powerd preventScreenSaver 1 >/dev/null 2>&1 || { echo 'power_set_failed' >&2; exit 2; }
-printf 'url = "%s"\n' "$CALENDAR_URL" > "$LOCK/curl.conf" || exit 2
+PRIVATE_DIR=$(mktemp -d /tmp/family-calendar-run.XXXXXX) || exit 2
+if [ "$MODE" = loop ] && [ "$POWER_MODE" = rtc ]; then
+    wake_device || { echo 'power_wake_failed' >&2; exit 2; }
+    run_child sleep 2
+fi
+pause_statusbar || { echo 'statusbar_pause_failed' >&2; exit 2; }
 : > "$LOCK/ready" || exit 2
-notice=$(expiry_notice)
-[ -z "$notice" ] || log_event "$notice"
 if [ "$MODE" = loop ] && validate_png "$BASE/calendar.png"; then
     if run_child "$FBINK" -c -f -g "file=$BASE/calendar.png" >/dev/null 2>&1; then
         DISPLAY_KNOWN=1
@@ -203,7 +237,17 @@ if [ "$MODE" = loop ] && validate_png "$BASE/calendar.png"; then
 fi
 while :; do
     result=0
-    sync_once || result=1
+    if [ "$MODE" = loop ] && [ "$POWER_MODE" = rtc ]; then
+        if ! prepare_network; then
+            STATUS=network_wake_failed
+            result=1
+        fi
+    fi
+    if [ "$result" -eq 0 ]; then sync_once || result=1; fi
+    if ! restore_wifi; then
+        STATUS=wifi_restore_failed
+        result=1
+    fi
     if [ "$result" -eq 0 ]; then
         LAST_SUCCESS=$(date +%s)
         FAILURES=0
@@ -213,5 +257,15 @@ while :; do
     write_state
     rm -f "$LOCK/next.png"
     [ "$MODE" != once ] || exit "$result"
-    run_child sleep "$INTERVAL"
+    if [ "$POWER_MODE" = rtc ]; then
+        if ! wait_for_slot; then
+            STATUS=wake_schedule_failed
+            FAILURES=$((FAILURES + 1))
+            NEXT_SYNC=0
+            write_state
+            exit 1
+        fi
+    else
+        run_child sleep "$INTERVAL"
+    fi
 done

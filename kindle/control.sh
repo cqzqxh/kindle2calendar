@@ -47,10 +47,13 @@ case "${1:-}" in
         report_power_recovery
         read_state
         printf 'status=%s\nfailures=%s\n' "$STATUS" "$FAILURES"
+        next_sync=$(read_field "$BASE/state" next_sync)
+        if [ "$status_code" -eq 0 ] && is_uint "$next_sync" && [ "$next_sync" -gt 0 ]; then
+            printf 'next_sync=%s\n' "$(utc_time "$next_sync")"
+        fi
         if [ "$LAST_SUCCESS" -eq 0 ]; then echo '尚无成功同步'; else printf 'last_success=%s\n' "$(utc_time "$LAST_SUCCESS")"; fi
         if load_config; then
-            printf 'url_expires_at=%s (%s)\n' "$URL_EXPIRES_AT" "$(utc_time "$URL_EXPIRES_AT")"
-            expiry_notice
+            echo 'discovery=timestamped_list'
         else
             echo 'configuration_invalid'
             status_code=2

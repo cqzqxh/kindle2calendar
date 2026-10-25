@@ -1,4 +1,4 @@
-"""CalDAV -> real CLI/render/upload/readback -> real Kindle download.
+"""CalDAV -> real CLI/render/upload/readback -> real Kindle discovery/download.
 
 Only external HTTP services and hardware are fixtures. Every application stage
 runs as its normal subprocess, including the bounded Kodo HTTP worker.
@@ -99,16 +99,30 @@ class Services:
             access, signature, policy64 = token.split(":")
             assert access == "e2e-ak" and AUTH.token(policy64) == access + ":" + signature
             policy = json.loads(base64.urlsafe_b64decode(policy64))
-            assert policy["scope"] == BUCKET + ":" + key
-            assert policy["insertOnly"] == int(not key.endswith("/latest.png"))
-            artifact = validate_artifact(image, expected_screen=SCREEN)
-            assert key in (artifact.history_key, artifact.latest_key)
-            if self.mode == "upload_failure" or (self.mode == "latest_failure" and key.endswith("/latest.png")):
+            assert policy["scope"] == BUCKET + ":" + key and policy["insertOnly"] == 1
+            assert validate_artifact(image, expected_screen=SCREEN).object_key() == key
+            if self.mode == "upload_failure":
                 return 403, b"", {}
-            if key in self.objects and policy["insertOnly"]:
+            if key in self.objects:
                 return 614, b"", {}
             self.objects[key] = image
             return 200, json.dumps({"key": key, "hash": etag_stream(io.BytesIO(image))}).encode(), {}
+        if host == "rsf.qiniuapi.com":
+            signing = (f"GET {handler.path}\nHost: {host}\nContent-Type: application/x-www-form-urlencoded\n"
+                       f"X-Qiniu-Date: {handler.headers['X-Qiniu-Date']}\n\n")
+            assert handler.headers["Authorization"] == "Qiniu " + AUTH.token(signing)
+            params = parse_qs(path.query, keep_blank_values=True)
+            assert params["bucket"] == [BUCKET]
+            if self.mode == "list_failure" and params["marker"] != [""]:
+                return 403, b"", {}
+            keys = sorted(key for key in self.objects if key.startswith(params["prefix"][0]))
+            # Force pagination even for one object; the first page is incomplete.
+            if keys and params["marker"] == [""]:
+                result = {"items": [], "marker": "page+/="}
+            else:
+                assert params["marker"] in ([""], ["page+/="])
+                result = {"items": [{"key": key} for key in keys]}
+            return 200, json.dumps(result).encode(), {}
         if host == "images.e2e.test":
             unsigned, supplied = handler.path.rsplit("&token=", 1)
             assert supplied == AUTH.token("https://" + host + unsigned)
@@ -118,9 +132,7 @@ class Services:
             key = path.path.lstrip("/")
             if key not in self.objects:
                 return 404, b"", {}
-            image = self.objects[key]
-            if self.mode == "readback_failure" and "/history/" in key and image != self.previous:
-                image = b"broken image"
+            image = b"broken image" if self.mode == "readback_failure" else self.objects[key]
             return 200, image, {}
         raise AssertionError("Unexpected service")
 
@@ -169,7 +181,7 @@ class EndToEndTests(unittest.TestCase):
         self.output = self.root / "generated/calendar.png"
         self.device = self.root / "device"
         self.device.mkdir()
-        for name in ("run.sh", "common.sh"):
+        for name in ("run.sh", "common.sh", "power.sh", "discover.sh", "statusbar.sh"):
             shutil.copyfile(ROOT / "kindle" / name, self.device / name)
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
@@ -177,12 +189,14 @@ class EndToEndTests(unittest.TestCase):
             command = bin_dir / name
             command.write_text(f"#!{sys.executable}\n" + (SUPPORT / "device_command.py").read_text())
             command.chmod(0o700)
+        config = {"access_key": "e2e-ak", "secret_key": "e2e-secret", "bucket": BUCKET,
+                  "domain": "https://images.e2e.test", "screen_id": SCREEN}
+        (self.device / "discovery.json").write_text(json.dumps(config))
+        (self.device / "discovery.json").chmod(0o600)
         (self.device / "ca.pem").touch()
         (self.device / "config.sh").write_text(
-            "\n".join(f"{key}={shlex.quote(str(value))}" for key, value in {
-                "CALENDAR_URL": AUTH.private_download_url(
-                    f"https://images.e2e.test/family-calendar/{SCREEN}/latest.png", expires=3600),
-                "CA_CERT": self.device / "ca.pem",
+            "POWER_MODE=awake\n" + "\n".join(f"{key}={shlex.quote(str(value))}" for key, value in {
+                "DISCOVERY_CONFIG": self.device / "discovery.json", "CA_CERT": self.device / "ca.pem",
                 "FBINK": bin_dir / "fbink"}.items()) + "\n")
         self.env.update(PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], E2E_DEVICE=str(self.device),
                         E2E_CURL=shutil.which("curl"))
@@ -191,8 +205,7 @@ class EndToEndTests(unittest.TestCase):
         old = build_artifact(old_png.getvalue(), GenerationContext(
             self.services.now - timedelta(days=1), SCREEN, "previous", 1))
         self.previous = old.png_bytes
-        self.services.objects[old.latest_key] = self.previous
-        self.services.previous = self.previous
+        self.services.objects[old.object_key()] = self.previous
         (self.device / "calendar.png").write_bytes(self.previous)
         (self.device / "display.png").write_bytes(self.previous)
 
@@ -203,18 +216,12 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotIn(secret, result.stdout + result.stderr)
         return result
 
-    def publish(self):
-        result = self.command([sys.executable, "-m", "scripts.publish_calendar", "--image", str(self.output)])
+    def sync(self):
+        result = self.command([sys.executable, "-m", "scripts.sync_calendar", "--output", str(self.output)])
         state = json.loads(result.stdout)
         self.assertEqual(state["exit_code"], result.returncode)
+        self.assertEqual(json.loads((self.output.parent / "status.json").read_text()), state)
         return result, state
-
-    def sync(self):
-        generated = self.command([sys.executable, "preview.py", "--caldav", "--screen-id", SCREEN,
-                                  "--output", str(self.output)])
-        if generated.returncode:
-            return generated, {"status": "source_or_render_failed"}
-        return self.publish()
 
     def poll(self, expected="updated"):
         result = self.command(["sh", str(self.device / "run.sh"), "--once"])
@@ -238,17 +245,18 @@ class EndToEndTests(unittest.TestCase):
                  "source_id": "0:family-fixture", "start": datetime.combine(day, datetime.min.time(), ZoneInfo("Asia/Shanghai")).isoformat(),
                  "end": datetime.combine(day + timedelta(days=1), datetime.min.time(), ZoneInfo("Asia/Shanghai")).isoformat(), "all_day": True}]
         expected = render_calendar(rows, generated.generated_at.astimezone(ZoneInfo("Asia/Shanghai")),
-                                   {"city": "E2E City", "days": []}, compact=True)
+                                   {"city": "E2E City", "days": []}, compact=True, update_interval_minutes=5)
         with Image.open(io.BytesIO(expected)) as image, Image.open(self.output) as actual:
             self.assertEqual(image.tobytes(), actual.tobytes())
-        self.assertEqual(self.services.objects[state["latest_key"]], generated.png_bytes)
+        self.assertEqual(self.services.objects[state["object_key"]], generated.png_bytes)
         self.poll()
         self.assertEqual((self.device / "calendar.png").read_bytes(), generated.png_bytes)
         self.assertEqual((self.device / "display.png").read_bytes(), generated.png_bytes)
         hosts = [host for host, _, _ in self.services.calls]
         self.assertIn("geocoding-api.open-meteo.com", hosts)
-        self.assertEqual(hosts.count("upload.e2e.test"), 2)
-        self.assertGreaterEqual(hosts.count("images.e2e.test"), 5)
+        self.assertEqual(hosts.count("rsf.qiniuapi.com"), 2)
+        self.assertEqual(hosts.count("images.e2e.test"), 2)
+        self.assertLess(hosts.index("upload.e2e.test"), hosts.index("images.e2e.test"))
 
     def test_successful_empty_calendar_is_published_and_displayed(self):
         self.services.mode = "empty"
@@ -258,7 +266,7 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual((self.device / "calendar.png").read_bytes(), self.output.read_bytes())
 
     def test_source_failure_never_publishes_stale_local_image(self):
-        self.output.parent.mkdir(parents=True)
+        self.output.parent.mkdir()
         self.output.write_bytes(self.previous)
         self.services.mode = "source_failure"
         result, state = self.sync()
@@ -272,38 +280,25 @@ class EndToEndTests(unittest.TestCase):
     def test_upload_failure_preserves_cloud_and_device_previous_image(self):
         self.services.mode = "upload_failure"
         result, state = self.sync()
-        self.assertEqual(result.returncode, 4, state)
-        self.assertEqual(state["status"], "failed_before_overwrite")
+        self.assertEqual(result.returncode, 5, state)
+        self.assertEqual(state["status"], "upload_failed")
         self.assertEqual(len(self.services.objects), 1)
-        self.poll()  # The fixed entry still serves the last verified image.
+        self.poll()  # Today's empty prefix falls back to yesterday's committed image.
         self.assert_previous()
 
     def test_readback_failure_does_not_report_success(self):
         self.services.mode = "readback_failure"
         result, state = self.sync()
-        self.assertEqual(result.returncode, 4, state)
-        self.assertEqual(state["status"], "failed_before_overwrite")
-        self.assertEqual(self.services.objects[state["latest_key"]], self.previous)
+        self.assertEqual(result.returncode, 5, state)
+        self.assertEqual(state["status"], "publication_unconfirmed")
+        self.assertEqual(state["error_code"], "readback_failed")
         self.assert_previous()
 
-    def test_latest_upload_failure_preserves_previous_image(self):
-        self.services.mode = "latest_failure"
-        result, state = self.sync()
-        self.assertEqual(result.returncode, 4, state)
-        self.assertEqual(state["status"], "failed_previous_retained")
-        self.assertEqual(self.services.objects[state["latest_key"]], self.previous)
-        self.poll()
-        self.assert_previous()
-
-    def test_republishing_identical_artifact_is_idempotent(self):
+    def test_partial_list_failure_preserves_previous_image(self):
         self.assertEqual(self.sync()[0].returncode, 0)
-        uploads = sum(host == "upload.e2e.test" for host, _, _ in self.services.calls)
-        result, state = self.publish()
-        self.assertEqual(result.returncode, 0, state)
-        self.assertEqual(state["status"], "already_current")
-        self.assertEqual(sum(host == "upload.e2e.test" for host, _, _ in self.services.calls), uploads)
-        self.poll()
-        self.assertEqual((self.device / "calendar.png").read_bytes(), self.output.read_bytes())
+        self.services.mode = "list_failure"
+        self.poll("discovery_failed")
+        self.assert_previous()
 
     def test_download_failure_preserves_previous_image(self):
         self.assertEqual(self.sync()[0].returncode, 0)

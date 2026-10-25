@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 kindle/config.sh
+kindle/discovery.json
 artifacts/*
 !artifacts/README.md
 !artifacts/calendar-20261024-20261101/

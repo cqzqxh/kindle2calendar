@@ -51,7 +51,7 @@ class CLITests(unittest.TestCase):
             path = Path(folder) / "download.txt"
             out = io.StringIO()
             with redirect_stdout(out):
-                self.assertEqual(sign_main(["--output", str(path)]), 0)
+                self.assertEqual(sign_main(["--key", artifact().object_key(), "--output", str(path)]), 0)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             url = path.read_text().strip()
             params = parse_qs(urlsplit(url).query)
@@ -59,13 +59,13 @@ class CLITests(unittest.TestCase):
             self.assertNotIn("token", out.getvalue())
             self.assertNotIn("fixture-secret", url)
             with redirect_stdout(io.StringIO()):
-                self.assertEqual(sign_main(["--output", str(path)]), 2)
+                self.assertEqual(sign_main(["--key", artifact().object_key(), "--output", str(path)]), 2)
             self.assertEqual(path.read_text().strip(), url)
 
     def test_invalid_signature_duration_or_missing_secrets_creates_no_file(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, ENV, clear=True):
             path = Path(folder) / "download.txt"
-            for days in ("0", "-1", "366"):
+            for seconds in ("0", "-1", "301"):
                 with redirect_stdout(io.StringIO()):
-                    self.assertEqual(sign_main(["--output", str(path), "--expires-days", days]), 2)
+                    self.assertEqual(sign_main(["--key", artifact().object_key(), "--output", str(path), "--expires-seconds", seconds]), 2)
                 self.assertFalse(path.exists())

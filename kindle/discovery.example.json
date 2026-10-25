@@ -1,0 +1,7 @@
+{
+  "access_key": "DEDICATED_DEVICE_ACCESS_KEY",
+  "secret_key": "DEDICATED_DEVICE_SECRET_KEY",
+  "bucket": "YOUR_BUCKET",
+  "screen_id": "kindle-pw3",
+  "domain": "https://YOUR_AVAILABLE_DOWNLOAD_DOMAIN"
+}
