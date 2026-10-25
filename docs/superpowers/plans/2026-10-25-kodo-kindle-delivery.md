@@ -124,7 +124,7 @@ self.assertLess(store.writes.index(candidate.history_key), store.writes.index(ca
 
 | 检查 | 实际结果 |
 | --- | --- |
-| 完整回归 `python -m unittest discover -s tests -v` | 77 项通过，93.007 秒；31 设备、19 发布、13 Kodo、6 预览、5 CLI、1 日历、2 天气 |
+| 完整回归 `PYTHONPATH=tests .venv/bin/python -m unittest discover -s tests -v` | 101 项通过，75.769 秒；31 设备、19 发布、16 Kodo/HTTP、8 预览、5 CLI、8 CalDAV、1 日历、3 渲染、13 天气 |
 | Shell 语法 | run.sh、common.sh、control.sh、config.example.sh 全部通过 |
 | 工作流 | Ruby YAML 静态解析通过；未在真实 Runner 执行 |
 | 文档与差异 | 6 份 Markdown 本地链接无缺失，git diff --check 通过 |
