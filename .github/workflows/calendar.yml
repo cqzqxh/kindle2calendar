@@ -1,13 +1,9 @@
-name: 手动发布演示日历
+name: Publish Kindle calendar
 
 on:
+  schedule:
+    - cron: '7,37 * * * *'
   workflow_dispatch:
-    inputs:
-      confirm_empty_calendar:
-        description: 明确确认发布空日历到 demo- 屏幕，仅验证图片链路
-        type: boolean
-        required: true
-        default: false
 
 permissions:
   contents: read
@@ -20,34 +16,94 @@ jobs:
   publish:
     runs-on: [qiniu, ubuntu-24.04]
     timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
     env:
-      SCREEN_ID: ${{ vars.SCREEN_ID }}
+      QINIU_BUCKET: ${{ vars.QINIU_BUCKET || 'kindle2calendar' }}
+      SCREEN_ID: ${{ vars.SCREEN_ID || 'pw3' }}
       TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Shanghai' }}
+      WEATHER_CITY: ${{ vars.WEATHER_CITY }}
+      WEATHER_LATITUDE: ${{ vars.WEATHER_LATITUDE }}
+      WEATHER_LONGITUDE: ${{ vars.WEATHER_LONGITUDE }}
       FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
     steps:
-      - name: 确认演示目标并设置共享截止时间
+      - name: Validate configuration and set shared deadline
         env:
-          CONFIRM_EMPTY: ${{ inputs.confirm_empty_calendar }}
-        run: |
-          test "$CONFIRM_EMPTY" = true
-          case "$SCREEN_ID" in demo-?*) ;; *) echo '演示仅允许 demo- 屏幕'; exit 2 ;; esac
-          python3 -c 'import time; print("CALENDAR_DEADLINE_MONOTONIC=" + str(time.monotonic() + 540))' >> "$GITHUB_ENV"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified 2026-10-25
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, verified 2026-10-25
-        with:
-          python-version: '3.12.15'
-      - name: 安装依赖与中文字体
-        run: |
-          python -m pip install -r requirements.txt
-          sudo apt-get update
-          sudo apt-get install -y fonts-noto-cjk
-      - name: 生成明确的空日历演示图
-        run: python preview.py --screen-id "$SCREEN_ID" --output artifacts/calendar.png
-      - name: 发布并读回校验
-        env:
-          QINIU_ACCESS_KEY: ${{ secrets.QINIU_ACCESS_KEY }}
-          QINIU_SECRET_KEY: ${{ secrets.QINIU_SECRET_KEY }}
-          KODO_BUCKET: ${{ vars.KODO_BUCKET }}
+          QINIU_AK: ${{ secrets.QINIU_AK }}
+          QINIU_SK: ${{ secrets.QINIU_SK }}
+          TECENT_CalDAV_UID: ${{ secrets.TECENT_CalDAV_UID }}
+          TECENT_CalDAV_PASSWD: ${{ secrets.TECENT_CalDAV_PASSWD }}
           KODO_DOMAIN: ${{ vars.KODO_DOMAIN }}
           KODO_UPLOAD_HOST: ${{ vars.KODO_UPLOAD_HOST }}
-        run: python -m scripts.publish_calendar --image artifacts/calendar.png
+        run: |
+          missing=0
+          for name in QINIU_AK QINIU_SK TECENT_CalDAV_UID TECENT_CalDAV_PASSWD KODO_DOMAIN KODO_UPLOAD_HOST; do
+            if [ -z "${!name}" ]; then
+              printf '::error::Missing Actions configuration: %s\n' "$name"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+          python3 -c 'import time; print("CALENDAR_DEADLINE_MONOTONIC=" + str(time.monotonic() + 540))' >> "$GITHUB_ENV"
+
+      - name: Check out calendar source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified 2026-10-25
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /*.py
+            /requirements.txt
+            /scripts/
+            /storage/
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, verified 2026-10-25
+        with:
+          python-version: '3.12.15'
+
+      - name: Install dependencies and Chinese fonts
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          if [ ! -r "$FONT_PATH" ]; then
+            if [ "$(id -u)" -eq 0 ]; then
+              apt-get update -qq
+              apt-get install -y --no-install-recommends fonts-noto-cjk
+            else
+              sudo apt-get update -qq
+              sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+            fi
+          fi
+          test -r "$FONT_PATH"
+
+      - name: Generate calendar from Tencent CalDAV
+        env:
+          TECENT_CalDAV_ADDR: ${{ vars.TECENT_CalDAV_ADDR || 'dav.calendar.tencent.com' }}
+          TECENT_CalDAV_UID: ${{ secrets.TECENT_CalDAV_UID }}
+          TECENT_CalDAV_PASSWD: ${{ secrets.TECENT_CalDAV_PASSWD }}
+          CALDAV_CALENDAR_NAME: ${{ vars.CALDAV_CALENDAR_NAME }}
+        run: |
+          umask 077
+          for attempt in 1 2 3; do
+            if python preview.py --caldav --screen-id "$SCREEN_ID" --output "$RUNNER_TEMP/calendar.png"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+
+      - name: Publish calendar and verify readback
+        env:
+          QINIU_ACCESS_KEY: ${{ secrets.QINIU_AK }}
+          QINIU_SECRET_KEY: ${{ secrets.QINIU_SK }}
+          KODO_BUCKET: ${{ env.QINIU_BUCKET }}
+          KODO_DOMAIN: ${{ vars.KODO_DOMAIN }}
+          KODO_UPLOAD_HOST: ${{ vars.KODO_UPLOAD_HOST }}
+        run: python -m scripts.publish_calendar --image "$RUNNER_TEMP/calendar.png"
+
+      - name: Remove private temporary image
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/calendar.png"
