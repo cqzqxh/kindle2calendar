@@ -49,6 +49,7 @@ class PreviewTests(unittest.TestCase):
                 main(["--city", "上海", "--now", "2026-10-24T12:00:00", "--output", str(output)])
             self.assertEqual(fetch.call_args.args[0], "上海")
             self.assertEqual(render.call_args.args[2], forecast)
+            self.assertTrue(render.call_args.kwargs["compact"])
             with Image.open(output) as image:
                 self.assertEqual(image.size, (1072, 1448))
 

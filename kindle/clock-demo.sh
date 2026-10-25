@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 BASE=$(pwd)
 STATE="$BASE/.clock-demo"
 FBINK=${FBINK:-/mnt/us/usbnet/bin/fbink}
+EIPS=${EIPS:-/usr/sbin/eips}
 IMAGE=${IMAGE:-$BASE/preview_202610241720.png}
 FONT=${FONT:-/usr/java/lib/fonts/Amazon-Ember-Regular.ttf}
 # This experiment uses Shanghai time explicitly, independent of device settings.
@@ -20,7 +21,7 @@ case "${1:-start}" in
     start) ;;
     *) echo 'Usage: clock-demo.sh [start|stop]' >&2; exit 1 ;;
 esac
-[ -x "$FBINK" ] && [ -r "$IMAGE" ] && [ -r "$FONT" ]
+[ -x "$FBINK" ] && [ -x "$EIPS" ] && [ -r "$IMAGE" ] && [ -r "$FONT" ]
 mkdir "$STATE" || { echo 'Clock already running; inspect .clock-demo/pid' >&2; exit 1; }
 echo $$ > "$STATE/pid"
 PREVIOUS=''
@@ -28,8 +29,8 @@ SLEEP_PID=''
 UI_PID=''
 cleanup() {
     [ -z "$SLEEP_PID" ] || kill "$SLEEP_PID" 2>/dev/null || true
-    "$FBINK" -q -c -f -w -g "file=$IMAGE" || true
     [ -z "$UI_PID" ] || kill -CONT "$UI_PID" 2>/dev/null || true
+    "$EIPS" -g "$IMAGE" -w gc16 -f || true
     [ -z "$PREVIOUS" ] || lipc-set-prop com.lab126.powerd preventScreenSaver "$PREVIOUS" || true
     rm -f "$STATE/pid"
     rmdir "$STATE" || true
@@ -39,9 +40,10 @@ trap 'exit 0' INT TERM HUP
 PREVIOUS=$(lipc-get-prop com.lab126.powerd preventScreenSaver)
 lipc-set-prop com.lab126.powerd preventScreenSaver 1
 # The native status bar otherwise repaints its own clock over the calendar.
-UI_PID=$(pidof Xorg || true)
+UI_PID=$(pidof JunoStatusBarDriver || true)
 [ -z "$UI_PID" ] || kill -STOP "$UI_PID"
-"$FBINK" -q -c -f -w -g "file=$IMAGE"
+# Keep Xorg running. Use the native full-image path for this device.
+"$EIPS" -g "$IMAGE" -w gc16 -f
 while :; do
     CLOCK=$(date '+%H:%M')
     # Compose in memory, then submit one non-flashing refresh of this region.
