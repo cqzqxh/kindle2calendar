@@ -26,7 +26,7 @@
 | 天气 | 已支持城市查询、有效坐标优先、非法坐标回退及三天预报；待接入云端发布任务 |
 | 日历来源 | 钉钉共享日历的读取、权限和事件适配尚待实现 |
 | 定时计算与发布 | GitHub 工作流、批处理入口、Runner 接入和 Kodo 发布尚待实现 |
-| Kindle | 脚本已支持 Kodo 私有签名 URL，云端下载与实机显示仍待验证 |
+| Kindle | 脚本已支持 Kodo 私有签名 URL；固定 PNG 与分钟时钟已在 PW3 验证绘制和自动更新，云端下载仍待联调 |
 
 以下本机操作用于预览已有图片效果，不会启动完整的七牛 Runner 发布链路。
 
@@ -69,6 +69,10 @@ python preview.py --city 上海
 `kindle/clock-demo.sh` 在固定预览图右上角叠加北京时间，每到整分钟通过 FBInk 局部刷新。默认使用设备 `/mnt/us/family-calendar/preview_202610241720.png`、`/mnt/us/usbnet/bin/fbink` 和设备自带 Amazon Ember 字体，可用 `IMAGE`、`FBINK`、`FONT` 覆盖。运行前停止其他绘屏程序；在脚本所在目录执行 `nohup sh clock-demo.sh >clock-demo.log 2>&1 </dev/null &`，执行 `sh clock-demo.sh stop` 停止并恢复底图及原屏保抑制状态。不会自动恢复先前的轮播进程，也未设置开机自启。
 
 此实验独立于 `run.sh`，不修改原 PNG 或设备系统时区，不负责网络校时、跨天日历更新与云端图片切换。时钟持续运行需要设备保持唤醒，目前按 USB 供电验证。帧缓冲截图能验证绘制内容；实屏残影、闪烁与长期稳定性仍需观察。
+
+实验运行时临时暂停 Kindle 的 `Xorg` 绘屏进程，防止原生状态栏每分钟覆盖日历；正常停止脚本会恢复该进程，停止可能需要等当前一分钟等待结束。实验期间原生界面交互会暂停，异常强杀后可通过 SSH 执行 `kill -CONT $(pidof Xorg)` 恢复。
+
+2026-10-25 在 PW3 验证 `preview_202610241720.png` 上的时钟从 08:49 自动切换至 08:50；帧缓冲截图像素对比确认变化仅在右上角时钟框内。实屏残影与长时间运行尚未验收。
 
 将 `kindle/config.example.sh` 复制为设备目录下的 `config.sh`，填写 Kodo `latest.png` 的完整私有 HTTPS 签名 URL、对应域名的可信 CA bundle 路径以及 FBInk 路径。配置文件仅设备用户可读，并记录签名链接到期日。
 
