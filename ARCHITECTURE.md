@@ -1,10 +1,10 @@
-# 家庭日历技术方案：七牛 Runner + Kodo
+# 家庭日历技术方案：GitHub Actions + Kodo
 
-状态：Kodo 发布、签名工具、Kindle 轮询与手动演示工作流已实现；钉钉、自动天气查询及真实云端/设备联调未完成。本文描述目标完整架构，实际状态以 [README.md](README.md#当前状态) 为入口。
+状态：CalDAV 读取、天气查询、Kodo 发布、签名工具、Kindle 轮询与发布工作流已实现；真实云端发布和设备自动更新仍在联调。实际状态以 [README.md](README.md#当前状态) 为入口。
 
 ## 目标与范围
 
-家庭成员通过已有日历产品维护安排，项目只负责读取、排版、发布和设备展示。无需购买云主机，无需维护常驻 Web 服务和业务数据库。Runner / Sandbox 与 Kodo 资源费用按项目规模视为基本可忽略，不将其描述为永久免费。
+家庭成员通过已有日历产品维护安排，项目只负责读取、排版、发布和设备展示。无需购买云主机，无需维护常驻 Web 服务和业务数据库。执行费用受 GitHub Actions 额度和 Kodo 计费影响，不将其描述为永久免费。
 
 首版选择一个腾讯日历（CalDAV）、一台 Kindle PW3；飞书通过后续适配器接入。无需为演示额外加入 AI 或重做手机管理端。业务背景和价值见 [PRODUCT.md](PRODUCT.md)，显示规范见 [DESIGN.md](DESIGN.md)。
 
@@ -14,7 +14,7 @@
 flowchart LR
     CAL["腾讯日历<br/>手机添加与更新日程"]
     GH["GitHub Actions<br/>每 30 分钟定时触发"]
-    RUN["七牛 Runner<br/>读取日历 · 生成 PNG"]
+    RUN["GitHub Ubuntu Runner<br/>读取日历 · 生成 PNG"]
     KODO[("Kodo 对象存储<br/>保存最新日历图片")]
     KINDLE["Kindle 墨水屏<br/>定时下载并展示"]
 
@@ -25,22 +25,22 @@ flowchart LR
 
     classDef default fill:#f8fafc,stroke:#64748b,color:#0f172a;
     classDef qiniu fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
-    class RUN,KODO qiniu;
+    class KODO qiniu;
 ```
 
-日历产品负责编辑，GitHub 负责调度，七牛 Runner 按需生成图片，Kodo 持久保存，Kindle 独立拉取展示。首版先接腾讯日历 CalDAV；生成与下载失败时保留上一张成功图片。
+日历产品负责编辑，GitHub 负责调度并提供 Ubuntu Runner 按需生成图片，Kodo 持久保存，Kindle 独立拉取展示。首版先接腾讯日历 CalDAV；生成与下载失败时保留上一张成功图片。
 
 | 组件 | 职责 | 持久化内容 |
 | --- | --- | --- |
 | 腾讯日历 | 手机编辑、共享权限、日程保存 | 原始日程，作为唯一数据源 |
 | GitHub | 保存代码和工作流，定时调度，管理任务密钥 | 代码、任务状态和脱敏日志 |
-| 七牛 Runner | 为 Job 创建沙箱，执行 Python 批处理，结束后清理 | 不依赖沙箱本地文件跨任务保存 |
+| GitHub 托管 Runner | 为 Job 分配 Ubuntu 环境，执行 Python 批处理，结束后清理 | 不依赖执行环境本地文件跨任务保存 |
 | Kodo | 保存已发布图片，供设备独立下载 | 当前图片和有限历史版本 |
 | Kindle | 下载、验证、显示，失败保留上一张图 | 最近一次成功显示的 PNG 和设备配置 |
 
-采用七牛托管 Runner 平台，不自行部署 runnerd。仓库需安装平台 GitHub App，并在 Repositories 确认 Runner readiness、有效 Sandbox 来源和 Runner 规格。
+发布和回归工作流均采用 GitHub 托管的 `ubuntu-24.04`，由 GitHub 按任务分配临时环境。
 
-2026-10-24 文档核实时，线上公开模板接口提供 `[qiniu, ubuntu-24.04]` 标签；具体仓库能否使用仍以平台准入和 readiness 为准。无需在个人电脑保持 Runner 在线。
+GitHub Free 组织的私有仓库共享每月 2,000 分钟标准 Runner 额度；调度频率、任务耗时和其他工作流共同消耗额度，实际可用量以组织账单页面为准。
 
 腾讯日历使用 HTTPS CalDAV 地址、账号及专用密码接入，不依赖企业应用或 OAuth 权限。2026-10-25 已在本机验证连接、发现 4 个日历、读取并生成 1 条日期展示项。默认合并全部可发现日历，可通过 `CALDAV_CALENDAR_NAME` 指定唯一名称；账号下可见不代表家庭成员均可编辑，成员共享、增删改传播和服务端重复例外仍需单独验收。
 
@@ -59,7 +59,7 @@ CalDAV 返回空列表且查询完整成功时，允许发布空日历，以正�
 
 ## 调度与刷新
 
-当前 [`.github/workflows/calendar.yml`](.github/workflows/calendar.yml) 只开放手动演示：显式确认空日历，限制 `demo-` 屏幕，完成渲染、上传和读回。已固定 Action 提交、Python/Pillow/HTTP 依赖并安装中文字体。真实来源未接入前，不开启周期性空日历发布。
+当前 [`.github/workflows/calendar.yml`](.github/workflows/calendar.yml) 支持手动触发及默认分支定时调度，读取 CalDAV 后完成渲染、上传和读回。已固定 Action 提交、Python/Pillow/HTTP 依赖并安装中文字体。先完成手动验收和仓库 Variables 配置，再合入默认分支启用调度。
 
 以下是接入真实来源后的生产调度目标，省略 `steps`，不能直接作为完整工作流运行：
 
@@ -80,7 +80,7 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: [qiniu, ubuntu-24.04]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       WEATHER_CITY: ${{ vars.WEATHER_CITY }}
@@ -201,19 +201,17 @@ Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确�
 
 ## 验收与实施顺序
 
-1. **依赖验证**：用一个演示日历读取活动；手动工作流在七牛 Runner 成功执行；Kodo 私有 HTTPS 图片能被 Kindle 实际下载、显示。并行于开发尽早完成设备运行环境检查。
+1. **依赖验证**：用一个演示日历读取活动；手动工作流在 GitHub 托管 Runner 成功执行；Kodo 私有 HTTPS 图片能被 Kindle 实际下载、显示。并行于开发尽早完成设备运行环境检查。
 2. **云端闭环**：实现单次批处理，验证新增、修改、删除和空日历；重复、全天、跨天、月末及跨年事件须符合来源语义。
 3. **可靠发布**：验证分页失败不发布空图、天气失败仍可生成、覆盖更新可见、签名过期不替换旧图、旧版本拒绝覆盖、任务中断及重跑后的恢复。天气覆盖有效坐标优先、零值坐标、仅城市、无配置、单项 / 非法坐标回退、同名城市和地理编码失败。
 4. **实机试运行**：观察 48–72 小时，覆盖午夜切换、网络中断和恢复。设备需要 Wi-Fi，首版 USB 供电，不承诺深度休眠续航。
-5. **展示交付**：现场完成“手机修改 → 手动触发 → 七牛任务完成 → Kodo 新图片 → Kindle 新画面”，并保留运行失败时的说明和已成功生成的备用演示图。
+5. **展示交付**：现场完成“手机修改 → 手动触发 → GitHub Actions 任务完成 → Kodo 新图片 → Kindle 新画面”，并保留运行失败时的说明和已成功生成的备用演示图。
 
 关键依赖是：共享日历的应用读取权限、仓库的 Runner 使用权限、Kodo 长期 HTTPS 域名，以及 PW3 的脚本 / TLS / FBInk 环境。实现阶段按这四项分别验证，不将云端上传成功等同于实机交付完成。
 
 ## 官方依据
 
-- [七牛 Runner 官方项目及运行原理](https://github.com/qiniu/ci-runner)：按 Job 创建临时 Sandbox，结束后清理。
-- [七牛托管版接入指南](https://runner.qiniuinc.com/docs/getting-started/hosted)。
-- [线上公开 Runner 模板](https://runner.qiniuinc.com/api/public/runner-templates)：已核实包含 `qiniu + ubuntu-24.04`。
+- [GitHub Actions 计费与免费额度](https://docs.github.com/en/billing/concepts/product-billing/github-actions)：标准 Runner 额度、仓库所有者计费及超额用量。
 - [GitHub schedule](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)：默认分支、调度间隔、延迟及公开仓库停用规则。
 - [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)：串行运行、待运行任务替换与执行顺序。
 - [python-caldav 官方教程](https://caldav.readthedocs.io/stable/tutorial.html)：2026-10-25 核实日历发现、时间窗口查询和重复实例展开接口。

@@ -78,7 +78,9 @@ python -m scripts.publish_calendar --image artifacts/calendar.png
 
 命令输出脱敏 JSON。退出码 `0` 表示发布或相同内容幂等成功，`2` 表示输入/配置错误，`3` 表示旧版本或身份冲突，`4` 表示失败且已保留/恢复旧图，`5` 表示首次失败或最终结果未确认。首次发布无旧版时不会报告回滚成功。程序设有共享总预算和 HTTP 子进程硬超时。
 
-仓库中的 [手动工作流](../.github/workflows/calendar.yml) 使用 `[qiniu, ubuntu-24.04]`。在 Actions Variables 配置上表非敏感项、Secrets 配置 AK/SK，确认 Runner readiness 后手动触发；必须勾选空日历演示确认且 `SCREEN_ID` 以 `demo-` 开头。工作流串行发布，不上传私密 PNG 附件。钉钉来源尚未接入，因此未启用生产定时任务；接入真实来源并完成手动验收后再启用 `7,37 * * * *`。
+仓库中的 [发布工作流](../.github/workflows/calendar.yml) 使用 GitHub 托管的 `ubuntu-24.04`。Secrets 使用 `QINIU_AK`、`QINIU_SK`、`TECENT_CalDAV_UID` 和 `TECENT_CalDAV_PASSWD`；Variables 使用 `QINIU_BUCKET`、`TECENT_CalDAV_ADDR`、`KODO_DOMAIN` 和 `KODO_UPLOAD_HOST`。手动测试可通过输入项指定本次下载域名和上传入口。工作流读取真实 CalDAV 日程后生成并串行发布，默认 `SCREEN_ID=pw3`，不上传私密 PNG 附件；手动验收完成后再合入默认分支启用 `7,37 * * * *` 定时任务，定时任务使用仓库 Variables 中的域名和上传入口。
+
+GitHub Free 组织的私有仓库共享每月 2,000 分钟标准 Runner 额度，实际剩余额度以组织账单页面为准。按每天 48 次调度、30 天计算为每月 1,440 次任务，还需考虑每次执行时间及其他工作流的用量；不能保证始终处于免费额度内。见 [GitHub 官方额度说明](https://docs.github.com/en/billing/reference/product-usage-included)。
 
 ## 签发设备下载链接
 
@@ -143,6 +145,6 @@ sh -n kindle/config.example.sh
 
 仅运行端到端测试：`python -m unittest discover -s tests -p test_e2e.py -v`。需要已有中文字体、curl、jq 和 OpenSSL，不需要真实账号或云端权限。测试专用 `PYTHONPATH` 将外部请求路由到 loopback，并阻止 Python 测试子进程访问非本机地址；生产代码不增加 mock 开关。图片、配置和虚构凭据均在临时目录中，结束后清理。该测试不验证真实 HTTPS/TLS、服务端兼容性、IAM 或墨水屏硬件。
 
-[GitHub Actions 测试工作流](../.github/workflows/tests.yml) 在 push、pull request 和手动触发时，使用 GitHub 托管 Ubuntu 检查 Python 依赖一致性（`python -m pip check`）、全部 Kindle Shell 语法，并执行 `python -m unittest discover -s tests -v`，自动发现项目现有和新增测试。任一步骤失败都会使 CI 失败。工作流无需 Secrets，不发布图片；七牛 Runner 的手动发布演示入口保持独立。
+[GitHub Actions 测试工作流](../.github/workflows/tests.yml) 在 push、pull request 和手动触发时，使用 GitHub 托管 Ubuntu 检查 Python 依赖一致性（`python -m pip check`）、全部 Kindle Shell 语法，并执行 `python -m unittest discover -s tests -v`，自动发现项目现有和新增测试。任一步骤失败都会使 CI 失败。测试工作流无需 Secrets，不发布图片；日历发布由独立的 `calendar.yml` 工作流执行。
 
 2026-10-25 排查发现腾讯 CalDAV REPORT 对三个不同记录地址返回相同日程正文。逐条 GET 已验证能取回不同记录，接入层现按地址读取完整数据后再展开与去重；回归覆盖摘要重复及单条 GET 失败时停止生成。
