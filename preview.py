@@ -8,7 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from renderer import render_calendar
-from weather import WEATHER_LABELS, parse_daily
+from weather import WEATHER_LABELS, get_forecast, parse_daily
 
 
 def load_events(path):
@@ -38,10 +38,10 @@ def load_events(path):
     return sorted(events, key=lambda event: (event["day"], event["time"], event["title"]))
 
 
-def load_weather(path, city, today):
+def load_weather(path, city, today, *, latitude=None, longitude=None, timezone="Asia/Shanghai", offline=False):
     forecast = dict(city=city or "当地", days=[])
     if path is None:
-        return forecast
+        return forecast if offline else get_forecast(city, latitude, longitude, timezone, today)
     payload = json.loads(path.read_text(encoding="utf-8"))
     wanted = {(today + timedelta(days=i)).isoformat() for i in range(3)}
     rows = parse_daily(payload)
@@ -55,8 +55,11 @@ def load_weather(path, city, today):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="直接生成家庭日历 PNG，不启动 Web 服务")
     parser.add_argument("--events", type=Path, help="已规范化的日程 JSON 数组；省略则显示空日历")
-    parser.add_argument("--weather", type=Path, help="Open-Meteo daily JSON；省略则显示天气不可用")
-    parser.add_argument("--city", default=os.environ.get("WEATHER_CITY", ""), help="仅设置预览的地区标题")
+    parser.add_argument("--weather", type=Path, help="优先读取本地 Open-Meteo daily JSON；省略时自动查询天气")
+    parser.add_argument("--city", default=os.environ.get("WEATHER_CITY", ""), help="天气城市；有效坐标存在时用作标题")
+    parser.add_argument("--latitude", default=os.environ.get("WEATHER_LATITUDE"), help="可选纬度，优先使用完整有效坐标")
+    parser.add_argument("--longitude", default=os.environ.get("WEATHER_LONGITUDE"), help="可选经度，坐标不可用时按城市查询")
+    parser.add_argument("--offline", action="store_true", help="不请求网络，未提供天气文件时显示天气不可用")
     parser.add_argument("--timezone", default=os.environ.get("TIMEZONE") or "Asia/Shanghai")
     parser.add_argument("--now", help="指定预览时间，ISO 8601 格式；无时区时使用 --timezone")
     parser.add_argument("--output", type=Path, help="输出路径；默认 artifacts/preview_YYYYMMDDHHmm.png")
@@ -69,7 +72,8 @@ def main(argv=None):
         if output.resolve() in {path.resolve() for path in (args.events, args.weather) if path}:
             raise ValueError("输出路径不能覆盖输入 JSON")
         events = load_events(args.events)
-        weather = load_weather(args.weather, args.city.strip(), now.date())
+        weather = load_weather(args.weather, args.city.strip(), now.date(), latitude=args.latitude,
+                               longitude=args.longitude, timezone=args.timezone, offline=args.offline)
         png = render_calendar(events, now, weather)
         output.parent.mkdir(parents=True, exist_ok=True)
         if args.output:

@@ -10,7 +10,7 @@
 
 首版先接钉钉，后续适配飞书。钉钉承担日程编辑与保存，七牛 Runner 按需执行图片生成，Kodo 在任务结束后持续提供图片，Kindle 专注展示。无需新增常驻云主机、自建管理后台或业务数据库。按项目约定，小规模 Runner / Sandbox 与 Kodo 资源费用基本可忽略。
 
-- 日历图片：1072 × 1448、16 级灰度 PNG，月历星期一开头，展示近期安排和三天天气。
+- 日历图片：1072 × 1448、16 级灰度 PNG，月历星期一开头，展示尚未过期的前三项安排和三天天气。当前定时事项按开始时间过滤，全天事项保留到当天结束，不显示剩余数量或手机端查看提示。
 - 日常更新：生成任务和设备下载各为 30 分钟周期，修改到显示可能接近一小时，另加排队与执行时间。
 - 天气地区：在 GitHub Actions 配置；完整有效的经纬度优先，否则按城市名称查询。天气失败不影响日历生成。
 - 设备访问：目标为 Kodo 私有 HTTPS 下载，设备不保存云端上传密钥；首版签名链接需定期手动续期。
@@ -23,7 +23,7 @@
 | 能力 | 当前代码与目标差异 |
 | --- | --- |
 | 日历图片、天气图标 | 已有 Pillow 实现，可复用；外部日历的全天、跨天及重复实例需适配 |
-| 天气 | 已有预报数据解析；Actions 配置、城市查询和自动获取预报尚待实现 |
+| 天气 | 已支持城市查询、有效坐标优先、非法坐标回退及三天预报；待接入云端发布任务 |
 | 日历来源 | 钉钉共享日历的读取、权限和事件适配尚待实现 |
 | 定时计算与发布 | GitHub 工作流、批处理入口、Runner 接入和 Kodo 发布尚待实现 |
 | Kindle | 脚本已支持 Kodo 私有签名 URL，云端下载与实机显示仍待验证 |
@@ -47,18 +47,28 @@
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
-python preview.py
+python preview.py --city 上海
 ```
 
-默认直接生成带时间戳的图片，例如 `artifacts/preview_202610241137.png`，便于保留 Hackathon 展示素材。同一分钟重复生成时追加 `_2`、`_3` 等序号，避免覆盖已有图片。不启动服务、不访问网络、不发布到云端；没有输入日程时显示空日历，没有输入天气时显示“天气暂不可用”。
+默认直接生成带时间戳的图片，例如 `artifacts/preview_202610241137.png`，便于保留 Hackathon 展示素材。同一分钟重复生成时追加 `_2`、`_3` 等序号，避免覆盖已有图片。不启动服务、不发布到云端；没有输入日程时显示空日历。
+
+`--city 上海` 会自动查询上海坐标并获取三天天气，也可设置环境变量 `WEATHER_CITY` 后直接运行 `python preview.py`。提供完整有效的 `--latitude` / `--longitude` 或 `WEATHER_LATITUDE` / `WEATHER_LONGITUDE` 时优先使用坐标；坐标缺失、不完整或非法时回退到城市查询。不配置任何地区时不会猜测位置，天气区域显示不可用，终端提示设置城市或坐标。
 
 可使用 `--events /path/to/events.json` 读取已规范化的日程数组，字段为 `title`、`day`（YYYY-MM-DD）、可选 `time`（HH:mm，空字符串表示全天）及可选 `member`。跨天和重复事件需由日历接入层先展开，预览脚本不会代替来源适配器。
 
-`--weather /path/to/weather.json` 接受 Open-Meteo 的 `daily` JSON，包含 `time`、`weather_code`、`temperature_2m_min` 和 `temperature_2m_max` 数组。通过 `--city` 设置地区标题，`--now` 指定 ISO 8601 预览时间，`--timezone` 指定时区。默认文件名使用与图片一致的预览时间和时区，显式设置 `--now` 也会影响文件名。指定 `--output` 则使用该路径并允许覆盖已有输出文件。完整选项可用 `python preview.py --help` 查看。
+`--weather /path/to/weather.json` 优先读取本地 Open-Meteo `daily` JSON，不请求网络，数组字段为 `time`、`weather_code`、`temperature_2m_min` 和 `temperature_2m_max`。`--offline` 可显式关闭网络查询，没有天气文件时展示天气不可用；天气请求失败同样不会阻断日历生成。
 
-本地脚本仅预览已提供的数据；自动天气地区解析和网络查询仍待接入。目标方案的变量及回退规则见 [天气配置](ARCHITECTURE.md#天气地区配置)。
+通过 `--now` 指定 ISO 8601 预览时间，`--timezone` 指定日历与天气共同的时区。默认文件名使用与图片一致的预览时间和时区，显式设置 `--now` 也会影响文件名。天气请求使用预览日期起三天的明确起止日期，近期历史日期可在接口支持范围内自动查询；超出范围时可用 `--weather` 提供对应天气 JSON，避免将今天的天气放到历史图片中。指定 `--output` 则使用该路径并允许覆盖已有输出文件。完整选项可用 `python preview.py --help` 查看。
+
+预报来自 [Open-Meteo](https://open-meteo.com/)，城市坐标数据来自 [GeoNames](https://www.geonames.org/)。GitHub Actions 使用同名环境变量，详见 [天气配置](ARCHITECTURE.md#天气地区配置)；工作流与云端发布仍待实现。
 
 ## Kindle 下载配置
+
+### 设备实时时钟实验
+
+`kindle/clock-demo.sh` 在固定预览图右上角叠加北京时间，每到整分钟通过 FBInk 局部刷新。默认使用设备 `/mnt/us/family-calendar/preview_202610241720.png`、`/mnt/us/usbnet/bin/fbink` 和设备自带 Amazon Ember 字体，可用 `IMAGE`、`FBINK`、`FONT` 覆盖。运行前停止其他绘屏程序；在脚本所在目录执行 `nohup sh clock-demo.sh >clock-demo.log 2>&1 </dev/null &`，执行 `sh clock-demo.sh stop` 停止并恢复底图及原屏保抑制状态。不会自动恢复先前的轮播进程，也未设置开机自启。
+
+此实验独立于 `run.sh`，不修改原 PNG 或设备系统时区，不负责网络校时、跨天日历更新与云端图片切换。时钟持续运行需要设备保持唤醒，目前按 USB 供电验证。帧缓冲截图能验证绘制内容；实屏残影、闪烁与长期稳定性仍需观察。
 
 将 `kindle/config.example.sh` 复制为设备目录下的 `config.sh`，填写 Kodo `latest.png` 的完整私有 HTTPS 签名 URL、对应域名的可信 CA bundle 路径以及 FBInk 路径。配置文件仅设备用户可读，并记录签名链接到期日。
 
@@ -73,4 +83,4 @@ python -m unittest discover -s tests -v
 sh -n kindle/run.sh
 ```
 
-当前回归覆盖图片灰度与日期边界、天气数据校验、离线 PNG 预览，以及使用模拟 curl / FBInk 的设备下载与失败恢复。通过测试不等于钉钉、Runner、Kodo 云端链路或实机已可用；上线前仍须完成 [实施与验收](ARCHITECTURE.md#验收与实施顺序)。
+当前回归覆盖图片灰度与日期边界、天气地区解析与回退、网络失败降级、PNG 预览，以及使用模拟 curl / FBInk 的设备下载与失败恢复。自动化测试模拟网络请求；通过测试不等于钉钉、Runner、Kodo 云端链路或实机已可用，上线前仍须完成 [实施与验收](ARCHITECTURE.md#验收与实施顺序)。

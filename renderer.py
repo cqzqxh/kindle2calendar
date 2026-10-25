@@ -2,7 +2,7 @@
 import calendar
 import io
 import os
-from datetime import date
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -32,6 +32,17 @@ def fit(draw, text, size, width):
     return text + "…"
 
 
+def upcoming_events(events, now):
+    """Keep all-day events through today; timed events expire at their start."""
+    today = now.date().isoformat()
+    pending = [event for event in events if event["day"] >= today and (
+        not event["time"] or datetime.fromisoformat(
+            event["day"] + "T" + event["time"]
+        ).replace(tzinfo=now.tzinfo) >= now
+    )]
+    return sorted(pending, key=lambda event: (event["day"], event["time"], event["title"]))[:3]
+
+
 def render_calendar(events, now, weather=None):
     image = Image.new("L", (WIDTH, HEIGHT), 255)
     d = ImageDraw.Draw(image)
@@ -43,9 +54,6 @@ def render_calendar(events, now, weather=None):
         d.text((x, y), value, font=font(size), fill=fill)
 
     text(48, 30, "家庭日历", 38)
-    clock = "更新于 " + now.strftime("%H:%M")
-    clock_size = 44
-    text(int(1024 - d.textlength(clock, font=font(clock_size))), 24, clock, clock_size)
     text(48, 95, f"{today.year} 年 {today.month} 月", 72)
     text(700, 102, f"{today.day:02d}", 82)
     text(840, 130, "星期" + "一二三四五六日"[today.weekday()], 32)
@@ -77,12 +85,11 @@ def render_calendar(events, now, weather=None):
 
     d.line((48, 947, 1024, 947), fill=0, width=3)
     text(48, 969, "近期安排", 34)
-    upcoming = [e for e in events if e["day"] >= today.isoformat()]
+    text(208, 977, "更新于（" + now.strftime("%H:%M") + "）", 26, 70)
+    upcoming = upcoming_events(events, now)
     if not upcoming:
         text(48, 1050, "接下来的日子，留些时间给家人。", 30)
-        text(48, 1110, "在手机端添加第一条日程。", 25, 80)
-    limit = 3 if weather is not None else 5
-    for i, event in enumerate(upcoming[:limit]):
+    for i, event in enumerate(upcoming):
         y = 1034 + 55 * i
         day = date.fromisoformat(event["day"])
         when = "今天" if day == today else f"{day.month}/{day.day}"
@@ -90,9 +97,6 @@ def render_calendar(events, now, weather=None):
         text(152, y, event["time"] or "全天", 25)
         text(260, y, event["title"], 28, width=520)
         text(813, y + 2, event["member"], 23, width=208)
-    if len(upcoming) > limit:
-        text(48, 1207 if weather is not None else 1352,
-             f"另有 {len(upcoming)-limit} 项安排，请在手机端查看", 22, 70)
     if weather is not None:
         d.line((48, 1260, 1024, 1260), fill=0, width=2)
         heading = weather["city"] + "天气"

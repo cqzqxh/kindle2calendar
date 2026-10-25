@@ -3,5 +3,12 @@ __pycache__/
 *.pyc
 .env
 kindle/config.sh
-artifacts/
+artifacts/*
+!artifacts/README.md
+!artifacts/calendar-20261024-20261101/
+!artifacts/movie-calendar-20261024-20261102/
+!artifacts/novel-calendar-20261024-20261102/
+!artifacts/hitchhiker-calendar-en-20261025-20261103/
+!artifacts/family-calendar-20261025-20261103/
+!artifacts/family-photos-20261025/
 .DS_Store
