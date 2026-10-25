@@ -129,6 +129,8 @@ jobs:
 
 ## Kodo 发布与下载
 
+模块接口、图片元数据、发布失败恢复、设备轮询与验收用例见 [Kodo 图片发布与 Kindle 定时拉取详细设计](docs/superpowers/specs/2026-10-25-kodo-kindle-delivery-design.md)。该详细设计是本节协议的实施细化，尚未实现。
+
 建议一个专用私有 Bucket，使用标准存储和可长期使用、证书受信任的 HTTPS 访问域名。30 天测试域名仅用于联调，不作为长期地址。
 
 对象布局示意：
@@ -179,7 +181,7 @@ Kindle 使用所选 HTTPS 域名的可信 CA 链，设备系统时间须正确�
 | --- | --- |
 | `preview.py` | 已有：直接读取输入 JSON 并生成本地 PNG，不启动服务或访问网络 |
 | `calendar_sources/dingtalk.py` | 待新增：钉钉只读接入、身份与授权、分页、日期与重复实例规范化 |
-| `scripts/publish_calendar.py` | 待新增：读取、渲染、校验、发布的云端批处理入口 |
+| `scripts/publish_calendar.py` | 待新增：校验并发布已生成 PNG 的批处理入口；来源读取与渲染由工作流前置生成步骤衔接 |
 | `storage/kodo.py` | 待新增：签名上传、历史版本、覆盖发布及读回校验 |
 | `.github/workflows/calendar.yml` | 待新增：定时 / 手动触发、Runner 标签、Secrets 和串行发布 |
 | `renderer.py` | 已有基础排版；待适配外部日历的全天、跨天及进行中活动 |

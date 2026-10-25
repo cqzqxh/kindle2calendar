@@ -36,6 +36,7 @@
 | --- | --- |
 | [PRODUCT.md](PRODUCT.md) | 项目背景、核心价值、交付成果和实施计划 |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 一张架构图、任务流程、Actions 配置、发布和鉴权协议 |
+| [Kodo 发布与 Kindle 拉取详细设计](docs/superpowers/specs/2026-10-25-kodo-kindle-delivery-design.md) | 图片与版本协议、上传校验和恢复、设备轮询与运行管理；待实现 |
 | [DESIGN.md](DESIGN.md) | 墨水屏布局、天气展示、空状态与失败状态 |
 | [AGENTS.md](AGENTS.md) | 开发约定、已确认决策和验证要求 |
 
