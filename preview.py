@@ -3,12 +3,14 @@ import argparse
 import json
 import os
 import re
+import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from renderer import render_calendar
 from weather import WEATHER_LABELS, parse_daily
+from publication import GenerationContext, build_artifact
 
 
 def load_events(path):
@@ -59,6 +61,7 @@ def main(argv=None):
     parser.add_argument("--city", default=os.environ.get("WEATHER_CITY", ""), help="仅设置预览的地区标题")
     parser.add_argument("--timezone", default=os.environ.get("TIMEZONE") or "Asia/Shanghai")
     parser.add_argument("--now", help="指定预览时间，ISO 8601 格式；无时区时使用 --timezone")
+    parser.add_argument("--screen-id", default="preview", help="图片所属屏幕，发布时须与 SCREEN_ID 一致")
     parser.add_argument("--output", type=Path, help="输出路径；默认 artifacts/preview_YYYYMMDDHHmm.png")
     args = parser.parse_args(argv)
     try:
@@ -71,6 +74,10 @@ def main(argv=None):
         events = load_events(args.events)
         weather = load_weather(args.weather, args.city.strip(), now.date())
         png = render_calendar(events, now, weather)
+        context = GenerationContext(now, args.screen_id,
+                                    os.environ.get("GITHUB_RUN_ID") or f"local-{uuid.uuid4()}",
+                                    int(os.environ.get("GITHUB_RUN_ATTEMPT") or "1"))
+        png = build_artifact(png, context).png_bytes
         output.parent.mkdir(parents=True, exist_ok=True)
         if args.output:
             output.write_bytes(png)
