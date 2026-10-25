@@ -15,6 +15,7 @@ from qiniu.utils import etag_stream
 
 from publication import Deadline, InvalidArtifact, StorageError, publish_artifact
 from storage.kodo import HTTPTransport, KodoConfig, KodoStorage
+from storage.http_worker import perform
 from test_publication import artifact, NOW
 
 
@@ -58,6 +59,21 @@ class KodoTests(unittest.TestCase):
             with self.subTest(status=status), self.assertRaises((StorageError, InvalidArtifact)):
                 store.read_image(image.latest_key)
             self.assertEqual(len(http.calls), 1)
+
+    def test_insecure_download_is_explicit_and_does_not_disable_upload_verification(self):
+        self.assertFalse(KodoConfig.from_env(ENV).insecure_download_tls)
+        for value in ("true", "false", "", "yes"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                KodoConfig.from_env({**ENV, "KODO_INSECURE_TLS": value})
+        image = artifact()
+        for value, verify in (("0", True), ("1", False)):
+            response = json.dumps({"key": image.latest_key, "hash": etag_stream(io.BytesIO(image.png_bytes))}).encode()
+            http = FakeHTTP([(200, {}, image.png_bytes), (200, {}, response)])
+            store = KodoStorage(KodoConfig.from_env({**ENV, "KODO_INSECURE_TLS": value}), transport=http)
+            self.assertEqual(store.read_image(image.latest_key).sha256, image.sha256)
+            self.assertEqual(http.calls[0][2]["verify_tls"], verify)
+            store.put_image(image.latest_key, image, False)
+            self.assertTrue(http.calls[1][2].get("verify_tls", True))
 
     def test_read_retries_transient_failure_but_never_changes_key(self):
         image = artifact()
@@ -157,6 +173,14 @@ class KodoTests(unittest.TestCase):
         self.assertIn(b"secret", run.call_args.kwargs["input"])
         self.assertEqual(run.call_args.kwargs["timeout"], 2)
 
+    def test_transport_passes_verification_flag_to_child_process(self):
+        completed = subprocess.CompletedProcess([], 0, json.dumps({"status": 404, "headers": {}, "body": ""}).encode(), b"")
+        with patch("storage.kodo.subprocess.run", return_value=completed) as run:
+            HTTPTransport().request("GET", "https://images.example", timeout=2)
+            self.assertIs(json.loads(run.call_args.kwargs["input"])["verify_tls"], True)
+            HTTPTransport().request("GET", "https://images.example", timeout=2, verify_tls=False)
+            self.assertIs(json.loads(run.call_args.kwargs["input"])["verify_tls"], False)
+
     def test_key_outside_screen_is_rejected_without_request(self):
         store, http = self.storage([])
         with self.assertRaises(ValueError):
@@ -165,6 +189,20 @@ class KodoTests(unittest.TestCase):
 
 
 class HTTPWorkerTests(unittest.TestCase):
+    def test_worker_defaults_to_verification_and_only_get_can_opt_out(self):
+        for method, flag, expected in (("GET", None, True), ("GET", True, True),
+                                      ("GET", False, False), ("POST", False, True)):
+            with self.subTest(method=method, flag=flag), patch("storage.http_worker.requests.Session") as session_class:
+                session = session_class.return_value.__enter__.return_value
+                session.request.return_value.__enter__.return_value.status_code = 404
+                payload = {"method": method, "url": "https://images.example", "max_bytes": 1024,
+                           "body": "", "fields": {}}
+                if flag is not None:
+                    payload["verify_tls"] = flag
+                self.assertEqual(perform(payload)["status"], 404)
+                self.assertIs(session.request.call_args.kwargs["verify"], expected)
+                self.assertIs(session.trust_env, False)
+
     @classmethod
     def setUpClass(cls):
         cls.cut_requests = 0

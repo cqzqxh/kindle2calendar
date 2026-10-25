@@ -14,7 +14,9 @@ def perform(payload):
     maximum = payload["max_bytes"]
     with requests.Session() as session:
         session.trust_env = False
-        options = dict(timeout=(5, 30), allow_redirects=False, stream=True)
+        # The explicit test override applies to downloads; uploads always verify TLS.
+        verify_tls = method != "GET" or payload.get("verify_tls", True) is not False
+        options = dict(timeout=(5, 30), allow_redirects=False, stream=True, verify=verify_tls)
         if method == "POST":
             image = base64.b64decode(payload["body"], validate=True)
             options.update(data=payload["fields"], files={"file": ("calendar.png", image, "image/png")})

@@ -13,6 +13,10 @@ on:
         description: 本次测试的上传入口（华东浙江）
         type: string
         default: https://upload.qiniup.com
+      insecure_kodo_tls:
+        description: 仅本次联调忽略 Kodo 下载证书校验
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +36,7 @@ jobs:
       QINIU_BUCKET: ${{ vars.QINIU_BUCKET || 'kindle2calendar' }}
       KODO_DOMAIN: ${{ inputs.kodo_domain || vars.KODO_DOMAIN }}
       KODO_UPLOAD_HOST: ${{ inputs.kodo_upload_host || vars.KODO_UPLOAD_HOST }}
+      KODO_INSECURE_TLS: ${{ inputs.insecure_kodo_tls && '1' || '0' }}
       SCREEN_ID: ${{ vars.SCREEN_ID || 'pw3' }}
       TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Shanghai' }}
       WEATHER_CITY: ${{ vars.WEATHER_CITY }}
@@ -94,14 +99,18 @@ jobs:
           from publication import StorageError
           from storage.kodo import HTTPTransport
 
+          verify_tls = os.environ["KODO_INSECURE_TLS"] != "1"
+          if not verify_tls:
+              print("::warning::Kodo download TLS verification disabled for this test run")
           try:
               status, _, _ = HTTPTransport().request(
-                  "GET", os.environ["KODO_DOMAIN"] + "/", timeout=30
+                  "GET", os.environ["KODO_DOMAIN"] + "/", timeout=30,
+                  verify_tls=verify_tls,
               )
           except StorageError as error:
               print(f"::error::Kodo HTTPS check failed: {error.code}")
               raise SystemExit(1)
-          print(f"Kodo TLS verification passed; root HTTP status: {status}")
+          print(f"Kodo HTTPS reachable; certificate verification: {verify_tls}; root HTTP status: {status}")
           PY
 
       - name: Generate calendar from Tencent CalDAV

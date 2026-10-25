@@ -61,8 +61,11 @@ python preview.py --caldav
 | `KODO_BUCKET` | 私有 Bucket 名称 |
 | `KODO_DOMAIN` | 下载 HTTPS 域名，不带路径、查询串或凭据 |
 | `KODO_UPLOAD_HOST` | 该 Bucket 所属区域的 HTTPS 上传入口，按七牛控制台核实 |
+| `KODO_INSECURE_TLS` | 默认 `0`；仅临时联调设为 `1`，跳过 Kodo 下载的证书校验；上传和 CalDAV 仍校验证书 |
 | `SCREEN_ID` | 固定屏幕标识，例如 `demo-screen`，必须与 PNG 元数据一致 |
 | `TIMEZONE` | 图片时区，默认 `Asia/Shanghai` |
+
+手动工作流可通过 `kodo_domain`、`kodo_upload_host` 指定本次测试地址。先保持 `insecure_kodo_tls=false` 验证正常 HTTPS；若确认失败原因为 `tls_error`，可勾选该开关临时复测。开关默认关闭，定时任务也保持证书校验。开启后无法验证下载服务器的身份，不用于长期运行；测试域名还受有效期、访问权限和缓存限制，跳过证书校验不代表发布链路可用。
 
 环境配置完成后，先生成并检查图片，再执行发布。以下空日历命令只用于专用演示屏幕；发布真实日程时给 preview 提供 `--events` 输入：
 

@@ -133,7 +133,7 @@ jobs:
 
 模块接口、图片元数据、发布失败恢复、设备轮询与验收用例见 [Kodo 图片发布与 Kindle 定时拉取详细设计](docs/superpowers/specs/2026-10-25-kodo-kindle-delivery-design.md)。发布与设备代码已实现，本地验证及外部待验收项见 [实施计划](docs/superpowers/plans/2026-10-25-kodo-kindle-delivery.md)。
 
-`publication.py` 管理发布状态机，`storage/kodo.py` 使用官方 SDK 签名和 ETag 算法。`KODO_UPLOAD_HOST` 明确指定 Bucket 所属区域的 HTTPS 上传入口；每次 HTTP 请求由独立子进程执行，关闭重定向、保持 TLS 校验，父进程限制下载 30 秒/上传 60 秒并服从共享总截止时间。Job 最多 10 分钟，内部最多 9 分钟且预留恢复时间；重试不重置预算。
+`publication.py` 管理发布状态机，`storage/kodo.py` 使用官方 SDK 签名和 ETag 算法。`KODO_UPLOAD_HOST` 明确指定 Bucket 所属区域的 HTTPS 上传入口；每次 HTTP 请求由独立子进程执行，关闭重定向、默认保持 TLS 校验，父进程限制下载 30 秒/上传 60 秒并服从共享总截止时间。仅临时联调可显式设置 `KODO_INSECURE_TLS=1` 跳过 Kodo 下载的证书校验，上传与 CalDAV 校验不变；手动工作流提供默认关闭的同用途开关，定时任务不启用。Job 最多 10 分钟，内部最多 9 分钟且预留恢复时间；重试不重置预算。
 
 建议一个专用私有 Bucket，使用标准存储和可长期使用、证书受信任的 HTTPS 访问域名。30 天测试域名仅用于联调，不作为长期地址。
 
